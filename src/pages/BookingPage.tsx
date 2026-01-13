@@ -140,10 +140,15 @@ export default function BookingPage() {
     securityHold: 500,
   };
 
+  const { data: sessionSettings } = useSessionSettings();
+
+  // Check if picnic is enabled in settings (default to true if setting missing)
+  const isPicnicEnabled = useMemo(() => isSessionEnabled(sessionSettings, 'picnic'), [sessionSettings]);
+
   const STEPS = [
     t('dateAndSession'),
     t('riders'),
-    t('picnic'),
+    ...(isPicnicEnabled ? [t('picnic')] : []), // Conditionally include Picnic step
     t('legalAgreement'),
     t('payment')
   ];
@@ -202,6 +207,7 @@ export default function BookingPage() {
   }, [sessionSettings, date, session]);
 
   const canShowPicnic = () => {
+    if (!isPicnicEnabled) return false;
     if (!date) return false;
     const bookingDate = new Date(date);
     const now = new Date();

@@ -1,12 +1,13 @@
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { useSessionSettings, useUpdateSessionSetting } from '@/hooks/useSessionSettings';
-import { Sun, Clock, Loader2, MessageSquare } from 'lucide-react';
+import { useSessionSettings, useUpdateSessionSetting, useCreateSessionSetting } from '@/hooks/useSessionSettings';
+import { Sun, Clock, Loader2, MessageSquare, ShoppingBag } from 'lucide-react';
 
 export function SessionSettingsManager() {
   const { data: settings, isLoading } = useSessionSettings();
   const updateMutation = useUpdateSessionSetting();
+  const createMutation = useCreateSessionSetting();
 
   if (isLoading) {
     return (
@@ -18,6 +19,7 @@ export function SessionSettingsManager() {
 
   const morningSetting = settings?.find(s => s.sessionType === 'morning');
   const dailySetting = settings?.find(s => s.sessionType === 'daily');
+  const picnicSetting = settings?.find(s => s.sessionType === 'picnic');
 
   return (
     <div className="space-y-6">
@@ -50,7 +52,7 @@ export function SessionSettingsManager() {
               disabled={updateMutation.isPending}
             />
           </div>
-          
+
           {!morningSetting?.isEnabled && (
             <div className="space-y-2">
               <Label className="text-sm flex items-center gap-2">
@@ -94,7 +96,7 @@ export function SessionSettingsManager() {
               disabled={updateMutation.isPending}
             />
           </div>
-          
+
           {!dailySetting?.isEnabled && (
             <div className="space-y-2">
               <Label className="text-sm flex items-center gap-2">
@@ -115,6 +117,34 @@ export function SessionSettingsManager() {
               />
             </div>
           )}
+        </div>
+      </div>
+
+
+      {/* Picnic Setting */}
+      <div className="p-4 border rounded-xl space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <ShoppingBag className="w-6 h-6 text-green-600" />
+            <div>
+              <Label className="text-base font-medium">שלב הפיקניק 🧺</Label>
+              <p className="text-sm text-muted-foreground">הצג/הסתר את שלב הפיקניק בהזמנה</p>
+            </div>
+          </div>
+          <Switch
+            checked={picnicSetting?.isEnabled ?? true}
+            onCheckedChange={(checked) => {
+              if (!picnicSetting) {
+                createMutation.mutate({ sessionType: 'picnic', isEnabled: checked });
+              } else {
+                updateMutation.mutate({
+                  sessionType: 'picnic',
+                  updates: { isEnabled: checked },
+                });
+              }
+            }}
+            disabled={updateMutation.isPending || createMutation.isPending}
+          />
         </div>
       </div>
 

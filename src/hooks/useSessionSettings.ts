@@ -4,7 +4,7 @@ import { useToast } from '@/hooks/use-toast';
 
 export interface SessionSetting {
   id: string;
-  sessionType: 'morning' | 'daily';
+  sessionType: 'morning' | 'daily' | 'picnic';
   isEnabled: boolean;
   season: string;
   startDate: string | null;
@@ -42,6 +42,32 @@ export function useSessionSettings() {
   });
 }
 
+export function useCreateSessionSetting() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+
+  return useMutation({
+    mutationFn: async (setting: { sessionType: string; isEnabled: boolean }) => {
+      const { error } = await supabase
+        .from('session_settings')
+        .insert({
+          session_type: setting.sessionType,
+          is_enabled: setting.isEnabled,
+          season: 'all',
+          disabled_message_he: 'האפשרות אינה זמינה כרגע',
+          disabled_message_en: 'Option currently unavailable'
+        });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['sessionSettings'] });
+    },
+    onError: (error) => {
+      toast({ title: 'Error creating setting', description: String(error), variant: 'destructive' });
+    },
+  });
+}
+
 export function useUpdateSessionSetting() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -75,16 +101,16 @@ export function useUpdateSessionSetting() {
 // Check if a session is enabled based on settings and current date
 export function isSessionEnabled(
   settings: SessionSetting[] | undefined,
-  sessionType: 'morning' | 'daily',
+  sessionType: 'morning' | 'daily' | 'picnic' | string,
   date?: string
 ): boolean {
   if (!settings) return true; // Default to enabled if settings not loaded
-  
+
   const setting = settings.find(s => s.sessionType === sessionType);
   if (!setting) return true;
-  
+
   if (!setting.isEnabled) return false;
-  
+
   // Check date range if specified
   if (date && setting.startDate && setting.endDate) {
     const checkDate = new Date(date);
@@ -92,6 +118,6 @@ export function isSessionEnabled(
     const end = new Date(setting.endDate);
     if (checkDate < start || checkDate > end) return false;
   }
-  
+
   return true;
 }
