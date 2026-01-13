@@ -140,10 +140,10 @@ export default function BookingPage() {
     securityHold: 500,
   };
 
-  const { data: sessionSettings } = useSessionSettings();
+  const { data: picnicSettings } = useSessionSettings();
 
   // Check if picnic is enabled in settings (default to true if setting missing)
-  const isPicnicEnabled = useMemo(() => isSessionEnabled(sessionSettings, 'picnic'), [sessionSettings]);
+  const isPicnicEnabled = useMemo(() => isSessionEnabled(picnicSettings, 'picnic'), [picnicSettings]);
 
   const STEPS = [
     t('dateAndSession'),
