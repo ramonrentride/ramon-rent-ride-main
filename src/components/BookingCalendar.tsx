@@ -2,18 +2,17 @@ import { useState, useMemo, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { useBookings } from '@/hooks/useSupabaseData';
-import { 
-  ONLINE_AVAILABLE_CAP, 
-  getOccupancyLevel, 
-  getOccupancyColor, 
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { useBookings, useBikes } from '@/hooks/useSupabaseData';
+import {
+  getOccupancyColor,
   getOccupancyTextColor,
   getOccupancyBorderColor,
-  type OccupancyLevel 
+  type OccupancyLevel
 } from '@/lib/inventory';
-import { ChevronLeft, ChevronRight, Calendar, Users, Bike, ExternalLink, Search } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Calendar, Users, Bike, ExternalLink, Search, Filter } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import type { Booking } from '@/lib/types';
+import type { Booking, BikeSize } from '@/lib/types';
 import {
   Dialog,
   DialogContent,
@@ -23,65 +22,114 @@ import {
 import { Link, useSearchParams } from 'react-router-dom';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
+// Dynamic occupancy calculation
+function calculateDayOccupancy(
+  dateStr: string,
+  bookings: Booking[],
+  bikes: any[], // Type is implied from useBikes
+  filterSize: BikeSize | 'ALL'
+): { bookedCount: number; totalCapacity: number; level: OccupancyLevel } {
+
+  // 1. Calculate Total Capacity based on ACTIVE fleet status
+  // Filter by size if selected, and only count 'available' bikes (or rented ones which are technically part of the active fleet)
+  // We exclude 'maintenance' and 'unavailable' from capacity to show REAL availability.
+
+  let relevantBikes = bikes.filter(b => b.status !== 'unavailable' && b.status !== 'maintenance');
+
+  if (filterSize !== 'ALL') {
+    relevantBikes = relevantBikes.filter(b => b.size === filterSize);
+  }
+
+  const totalCapacity = relevantBikes.length;
+
+  // 2. Calculate Booked Count
+  const dayBookings = bookings.filter(b => b.date === dateStr && b.status !== 'cancelled');
+
+  let bookedCount = 0;
+  dayBookings.forEach(booking => {
+    booking.riders.forEach(rider => {
+      // If we are filtering by size, only count riders assigned to that size (or requested that size?)
+      // Since booking rider structure has 'assignedSize', we use that.
+      if (filterSize === 'ALL') {
+        bookedCount++;
+      } else {
+        if (rider.assignedSize === filterSize) {
+          bookedCount++;
+        }
+      }
+    });
+  });
+
+  // 3. Determine Level
+  let level: OccupancyLevel = 'low';
+  if (totalCapacity === 0) {
+    level = 'full'; // No bikes available = Full/Blocked
+  } else {
+    const ratio = bookedCount / totalCapacity;
+    if (ratio >= 1) level = 'full';
+    else if (ratio > 0.8) level = 'high';
+    else if (ratio > 0.4) level = 'medium';
+  }
+
+  return { bookedCount, totalCapacity, level };
+}
+
 interface BookingCalendarProps {
   onDateSelect?: (date: string, bookings: Booking[]) => void;
 }
 
 export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) {
   const { data: bookings = [] } = useBookings();
+  const { data: bikes = [] } = useBikes(); // Fetch real fleet data
   const [searchParams, setSearchParams] = useSearchParams();
-  
+
   // Persist month/year in URL to prevent reset on edits
   const monthParam = searchParams.get('calMonth');
   const yearParam = searchParams.get('calYear');
   const now = new Date();
   const year = yearParam ? parseInt(yearParam) : now.getFullYear();
   const month = monthParam ? parseInt(monthParam) : now.getMonth();
-  
+
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [jumpToDate, setJumpToDate] = useState('');
   const [jumpDialogOpen, setJumpDialogOpen] = useState(false);
-  
+  const [sizeFilter, setSizeFilter] = useState<BikeSize | 'ALL'>('ALL'); // New Size Filter State
+
   // Get bookings for a specific date
   const getBookingsForDate = (dateStr: string): Booking[] => {
     return bookings.filter(b => b.date === dateStr && b.status !== 'cancelled');
   };
-  
-  // Get booked bikes count for a date
-  const getBookedBikesCount = (dateStr: string): number => {
-    const dateBookings = getBookingsForDate(dateStr);
-    return dateBookings.reduce((sum, b) => sum + b.riders.length, 0);
-  };
-  
-  // Get calendar data with booking details
+
+  // Get calendar data with dynamic calculations
   const calendarData = useMemo(() => {
     const firstDay = new Date(year, month, 1);
     const lastDay = new Date(year, month + 1, 0);
     const startDay = firstDay.getDay();
     const daysInMonth = lastDay.getDate();
-    
-    const days: { 
-      date: Date; 
-      dateStr: string; 
-      bookedCount: number; 
+
+    const days: {
+      date: Date;
+      dateStr: string;
+      bookedCount: number;
+      totalCapacity: number;
       level: OccupancyLevel;
       bookings: Booking[];
     }[] = [];
-    
+
     for (let day = 1; day <= daysInMonth; day++) {
       const date = new Date(year, month, day);
       const dateStr = date.toISOString().split('T')[0];
       const dayBookings = getBookingsForDate(dateStr);
-      const bookedCount = dayBookings.reduce((sum, b) => sum + b.riders.length, 0);
-      const level = getOccupancyLevel(bookedCount, ONLINE_AVAILABLE_CAP);
-      
-      days.push({ date, dateStr, bookedCount, level, bookings: dayBookings });
+
+      const { bookedCount, totalCapacity, level } = calculateDayOccupancy(dateStr, bookings, bikes, sizeFilter);
+
+      days.push({ date, dateStr, bookedCount, totalCapacity, level, bookings: dayBookings });
     }
-    
+
     return { days, startDay, daysInMonth };
-  }, [year, month, bookings]);
-  
+  }, [year, month, bookings, bikes, sizeFilter]);
+
   const updateCalendarParams = useCallback((newMonth: number, newYear: number) => {
     const params = new URLSearchParams(searchParams);
     params.set('calMonth', newMonth.toString());
@@ -108,13 +156,13 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
     updateCalendarParams(newMonth, newYear);
     setSelectedDate(null);
   };
-  
+
   const navigateYear = (direction: 'prev' | 'next') => {
     const newYear = direction === 'prev' ? year - 1 : year + 1;
     updateCalendarParams(month, newYear);
     setSelectedDate(null);
   };
-  
+
   const handleDateClick = (dateStr: string) => {
     setSelectedDate(dateStr);
     setDialogOpen(true);
@@ -134,30 +182,36 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
       setJumpToDate('');
     }
   };
-  
+
   const selectedBookings = selectedDate ? getBookingsForDate(selectedDate) : [];
-  
+
   const todayStr = new Date().toISOString().split('T')[0];
-  
+
   // Get next 5 days for real-time availability
   const getNext5Days = () => {
     const today = new Date();
-    const days: { date: string; label: string }[] = [];
+    const days: { date: string; label: string; booked: number; capacity: number; level: OccupancyLevel }[] = [];
     const dayNames = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
-    
+
     for (let i = 0; i < 5; i++) {
       const d = new Date(today);
       d.setDate(today.getDate() + i);
+      const dateStr = d.toISOString().split('T')[0];
+      const { bookedCount, totalCapacity, level } = calculateDayOccupancy(dateStr, bookings, bikes, sizeFilter);
+
       days.push({
-        date: d.toISOString().split('T')[0],
-        label: i === 0 ? 'היום' : i === 1 ? 'מחר' : dayNames[d.getDay()]
+        date: dateStr,
+        label: i === 0 ? 'היום' : i === 1 ? 'מחר' : dayNames[d.getDay()],
+        booked: bookedCount,
+        capacity: totalCapacity,
+        level
       });
     }
     return days;
   };
-  
+
   const next5Days = getNext5Days();
-  
+
   const weekDays = ['א׳', 'ב׳', 'ג׳', 'ד׳', 'ה׳', 'ו׳', 'ש׳'];
   const monthNames = [
     'ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני',
@@ -172,25 +226,48 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
 
   return (
     <div className="space-y-6">
-      {/* Real-time Availability Counter */}
+      {/* Header with Availability and Controls */}
       <div className="glass-card rounded-xl p-6">
-        <div className="flex justify-between items-center mb-4">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
           <h3 className="font-bold text-xl flex items-center gap-2">
             <Bike className="w-6 h-6 text-primary" />
             זמינות בזמן אמת
           </h3>
-          <Button variant="outline" onClick={() => setJumpDialogOpen(true)} className="gap-2">
-            <Search className="w-4 h-4" />
-            קפיצה לתאריך
-          </Button>
+
+          <div className="flex gap-2 w-full md:w-auto">
+            <div className="w-[180px]">
+              <Select value={sizeFilter} onValueChange={(v) => setSizeFilter(v as BikeSize | 'ALL')}>
+                <SelectTrigger>
+                  <div className="flex items-center gap-2">
+                    <Filter className="w-4 h-4" />
+                    <SelectValue placeholder="סינון לפי גודל" />
+                  </div>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="ALL">כל הגדלים</SelectItem>
+                  <SelectItem value="S">Small (S)</SelectItem>
+                  <SelectItem value="M">Medium (M)</SelectItem>
+                  <SelectItem value="L">Large (L)</SelectItem>
+                  <SelectItem value="XL">Extra Large (XL)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <Button variant="outline" onClick={() => setJumpDialogOpen(true)} className="gap-2 flex-1 md:flex-none">
+              <Search className="w-4 h-4" />
+              תאריך
+            </Button>
+          </div>
         </div>
+
         <div className="grid grid-cols-5 gap-3">
           {next5Days.map((day) => (
-            <AvailabilityCard 
+            <AvailabilityCard
               key={day.date}
-              label={day.label} 
-              booked={getBookedBikesCount(day.date)} 
-              total={ONLINE_AVAILABLE_CAP} 
+              label={day.label}
+              booked={day.booked}
+              total={day.capacity}
+              level={day.level}
             />
           ))}
         </div>
@@ -208,12 +285,12 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
               <ChevronLeft className="w-4 h-4" />
             </Button>
           </div>
-          
+
           <h2 className="text-2xl font-bold flex items-center gap-2">
             <Calendar className="w-6 h-6" />
             {monthNames[month]} {year}
           </h2>
-          
+
           <div className="flex items-center gap-2">
             <Button variant="outline" size="icon" onClick={() => navigateMonth('next')}>
               <ChevronRight className="w-4 h-4" />
@@ -224,27 +301,28 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
             </Button>
           </div>
         </div>
-        
+
         {/* Legend */}
         <div className="flex flex-wrap gap-4 mb-4 text-base">
           <div className="flex items-center gap-2">
             <div className="w-5 h-5 rounded bg-green-500" />
-            <span>0-40%</span>
+            <span>פנוי</span>
           </div>
           <div className="flex items-center gap-2">
             <div className="w-5 h-5 rounded bg-orange-500" />
-            <span>41-80%</span>
+            <span>עמוס</span>
           </div>
           <div className="flex items-center gap-2">
             <div className="w-5 h-5 rounded bg-red-500" />
-            <span>81-99%</span>
+            <span>מלא/סגור</span>
           </div>
-          <div className="flex items-center gap-2">
-            <div className="w-5 h-5 rounded bg-gray-500" />
-            <span>מלא</span>
-          </div>
+          {sizeFilter !== 'ALL' && (
+            <span className="text-sm text-muted-foreground mr-auto">
+              * מציג זמינות עבור מידה {sizeFilter} בלבד
+            </span>
+          )}
         </div>
-        
+
         {/* Weekday Headers - LARGER */}
         <div className="grid grid-cols-7 gap-1 mb-2">
           {weekDays.map((day, i) => (
@@ -253,32 +331,35 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
             </div>
           ))}
         </div>
-        
+
         {/* Calendar Grid - LARGER with booking details */}
         <div className="grid grid-cols-7 gap-2">
           {/* Empty cells for days before the first of the month */}
           {Array.from({ length: calendarData.startDay }).map((_, i) => (
             <div key={`empty-${i}`} className="min-h-[100px]" />
           ))}
-          
+
           {/* Day cells */}
-          {calendarData.days.map(({ date, dateStr, bookedCount, level, bookings: dayBookings }) => {
+          {calendarData.days.map(({ date, dateStr, bookedCount, totalCapacity, level, bookings: dayBookings }) => {
             const isToday = dateStr === todayStr;
             const isSelected = dateStr === selectedDate;
             const isPast = date < new Date(todayStr);
-            
+
+            // Check if blocked due to 0 capacity
+            const isBlocked = totalCapacity === 0 && !isPast;
+
             return (
               <button
                 key={dateStr}
                 onClick={() => handleDateClick(dateStr)}
-                disabled={isPast}
+                disabled={isPast && false} // Allow clicking past to see history
                 className={cn(
                   "min-h-[100px] p-2 rounded-lg flex flex-col items-start justify-start text-left transition-all relative",
                   "hover:ring-2 hover:ring-primary/50 hover:bg-muted/50",
                   isToday && "ring-2 ring-primary bg-primary/5",
                   isSelected && "ring-2 ring-accent",
-                  isPast && "opacity-40 cursor-not-allowed bg-muted/20",
-                  !isPast && bookedCount > 0 && `border-2 ${getOccupancyBorderColor(level)}`
+                  isPast && "opacity-60 bg-muted/20",
+                  !isPast && `border-2 ${getOccupancyBorderColor(level)}`
                 )}
               >
                 {/* Date number - LARGE */}
@@ -290,24 +371,25 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
                   )}>
                     {date.getDate()}
                   </span>
-                  
-                  {bookedCount > 0 && (
+
+                  {/* Availability Badge */}
+                  {!isPast && (
                     <div className={cn(
                       "text-xs font-bold px-1.5 py-0.5 rounded",
                       getOccupancyColor(level),
                       "text-white"
                     )}>
-                      {bookedCount} 🚴
+                      {totalCapacity === 0 ? 'אין אופניים' : (totalCapacity - bookedCount)}
                     </div>
                   )}
                 </div>
-                
+
                 {/* Booking details - show first 2 bookings */}
                 {dayBookings.length > 0 && (
                   <div className="space-y-0.5 w-full overflow-hidden">
                     {dayBookings.slice(0, 2).map((booking) => (
-                      <div 
-                        key={booking.id} 
+                      <div
+                        key={booking.id}
                         className="text-xs truncate bg-muted/70 px-1 py-0.5 rounded text-foreground"
                       >
                         {getBookingSummary(booking)}
@@ -325,7 +407,7 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
           })}
         </div>
       </div>
-      
+
       {/* Date Click Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="max-w-lg">
@@ -340,7 +422,7 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
               })}
             </DialogTitle>
           </DialogHeader>
-          
+
           <div className="space-y-4">
             {selectedBookings.length === 0 ? (
               <p className="text-muted-foreground text-center py-6 text-lg">
@@ -360,7 +442,7 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
                     </span>
                   </div>
                 </div>
-                
+
                 {/* Booking list in dialog */}
                 <ScrollArea className="max-h-[300px]">
                   <div className="space-y-2">
@@ -383,8 +465,8 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
                     ))}
                   </div>
                 </ScrollArea>
-                
-                <Link 
+
+                <Link
                   to={`/admin?tab=orders&date=${selectedDate}`}
                   onClick={() => setDialogOpen(false)}
                 >
@@ -408,7 +490,7 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
               קפיצה לתאריך
             </DialogTitle>
           </DialogHeader>
-          
+
           <div className="space-y-4">
             <div>
               <Label>בחר תאריך</Label>
@@ -420,7 +502,7 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
                 min={todayStr}
               />
             </div>
-            
+
             <div className="flex gap-2">
               <Button onClick={handleJumpToDate} className="flex-1">
                 פתח תאריך
@@ -437,18 +519,19 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
 }
 
 // Availability Card Component - LARGER
-function AvailabilityCard({ 
-  label, 
-  booked, 
-  total 
-}: { 
-  label: string; 
-  booked: number; 
-  total: number; 
+function AvailabilityCard({
+  label,
+  booked,
+  total,
+  level
+}: {
+  label: string;
+  booked: number;
+  total: number;
+  level: OccupancyLevel;
 }) {
-  const available = total - booked;
-  const level = getOccupancyLevel(booked, total);
-  
+  const available = Math.max(0, total - booked);
+
   return (
     <div className={cn(
       "rounded-xl p-5 text-center border-2 transition-all",

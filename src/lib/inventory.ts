@@ -2,19 +2,19 @@ import type { BikeSize } from './types';
 
 // Global inventory configuration
 export const TOTAL_FLEET = 15;          // Total physical bikes in fleet
-export const RESERVE_BIKES = 3;         // Emergency/reserve bikes - NEVER available online
-export const ONLINE_AVAILABLE_CAP = 12; // Maximum bikes available for online booking
+export const RESERVE_BIKES = 0;         // Reserve bikes concept deprecated in favor of explicit status
+export const ONLINE_AVAILABLE_CAP = 15; // Base capacity, but real availability counts 'status=available'
 
 // Legacy alias for backwards compatibility
 export const TOTAL_BIKES = ONLINE_AVAILABLE_CAP;
 
-// Bikes per size - total must equal TOTAL_FLEET
+// Bikes per size - approximate distribution for reference (actual source of truth is DB)
 export const BIKES_PER_SIZE: Record<BikeSize, number> = {
-  XS: 0,  // 0 bikes in size XS
-  S: 4,   // 4 bikes in size S
-  M: 5,   // 5 bikes in size M
-  L: 4,   // 4 bikes in size L
-  XL: 2,  // 2 bikes in size XL
+  XS: 0,
+  S: 4,
+  M: 5,
+  L: 4,
+  XL: 2,
 };
 
 // Maximum height deviation allowed when matching bikes (30%)
@@ -32,7 +32,7 @@ export type OccupancyLevel = 'low' | 'medium' | 'high' | 'full';
 
 export function getOccupancyLevel(bookedBikes: number, totalBikes: number = TOTAL_BIKES): OccupancyLevel {
   const occupancy = bookedBikes / totalBikes;
-  
+
   if (occupancy >= 1) return 'full';
   if (occupancy > OCCUPANCY_THRESHOLDS.MEDIUM) return 'high';
   if (occupancy > OCCUPANCY_THRESHOLDS.LOW) return 'medium';
