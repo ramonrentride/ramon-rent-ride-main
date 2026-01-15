@@ -133,6 +133,28 @@ export function useBikeLockCodes(enabled: boolean = true) {
   });
 }
 
+// For public booking - fetch availability by size
+export function usePublicAvailabilityBySize(startDate: string, endDate: string) {
+  return useQuery({
+    queryKey: ['publicAvailabilityBySize', startDate, endDate],
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc('get_public_availability_by_size', {
+        _start_date: startDate,
+        _end_date: endDate,
+      });
+      if (error) throw error;
+      return data as {
+        booking_date: string;
+        session_type: SessionType;
+        bike_size: BikeSize;
+        booked_count: number;
+      }[];
+    },
+    // Refresh every 30 seconds
+    refetchInterval: 30000,
+  });
+}
+
 // For public - returns bikes without sensitive lock_code data
 export function usePublicBikes() {
   return useQuery({
@@ -193,6 +215,8 @@ export function useUpdateBike() {
 export function useAddBike() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  // Note: We don't import useAuditActions here to avoid circular dependencies. 
+  // Audit logging for this action should be handled in the component layer or by a separate effect.
 
   return useMutation({
     mutationFn: async (bike: Omit<Bike, 'id'>) => {
@@ -216,8 +240,10 @@ export function useAddBike() {
           lock_code: bike.lockCode,
         });
       if (lockError) throw lockError;
+
+      return data.id;
     },
-    onSuccess: () => {
+    onSuccess: (newBikeId) => {
       queryClient.invalidateQueries({ queryKey: ['bikes'] });
       queryClient.invalidateQueries({ queryKey: ['bikeLockCodes'] });
       toast({ title: 'אופניים נוספו בהצלחה ✅' });
@@ -887,7 +913,7 @@ export interface PublicAvailabilityData {
 
 export function usePublicAvailability(startDate: string, endDate: string) {
   const queryClient = useQueryClient();
-  
+
   const query = useQuery({
     queryKey: ['publicAvailability', startDate, endDate],
     queryFn: async () => {
@@ -896,9 +922,9 @@ export function usePublicAvailability(startDate: string, endDate: string) {
           _start_date: startDate,
           _end_date: endDate,
         });
-      
+
       if (error) throw error;
-      
+
       return (data || []).map((row: any): PublicAvailabilityData => ({
         bookingDate: row.booking_date,
         sessionType: row.session_type,
@@ -912,7 +938,7 @@ export function usePublicAvailability(startDate: string, endDate: string) {
   // Subscribe to realtime updates for bookings table
   useEffect(() => {
     if (!startDate || !endDate) return;
-    
+
     const channel = supabase
       .channel('public-availability-updates')
       .on(
@@ -940,7 +966,7 @@ export function usePublicAvailability(startDate: string, endDate: string) {
 // ============= REALTIME SUBSCRIPTIONS =============
 export function useRealtimeSubscription(tableName: 'pricing' | 'bookings' | 'bikes' | 'picnic_menu' | 'mechanic_issues') {
   const queryClient = useQueryClient();
-  
+
   useEffect(() => {
     const channel = supabase
       .channel(`${tableName}-changes`)
@@ -992,22 +1018,22 @@ export function useValidateCoupon() {
   return useMutation({
     mutationFn: async (code: string) => {
       const clientId = getClientIdentifier();
-      
+
       const { data, error } = await supabase
         .rpc('validate_coupon_code', { _code: code, _client_id: clientId })
         .single();
-      
+
       if (error) throw error;
-      
+
       if (!data || !data.valid) {
         return { valid: false, error: data?.error_message || 'couponNotFound' };
       }
-      
+
       // Map 'percentage' from DB to 'percent' for app compatibility
       const discountType = data.discount_type === 'percentage' ? 'percent' : 'fixed';
-      
-      return { 
-        valid: true, 
+
+      return {
+        valid: true,
         coupon: {
           code,
           discount: Number(data.discount),
@@ -1025,7 +1051,7 @@ export function useMarkCouponUsed() {
     mutationFn: async ({ code, bookingId }: { code: string; bookingId: string }) => {
       const { data, error } = await supabase
         .rpc('use_coupon_code', { _code: code, _booking_id: bookingId });
-      
+
       if (error) throw error;
       if (!data) throw new Error('Failed to mark coupon as used');
     },
@@ -1041,13 +1067,13 @@ export function useGetBookingsByContact() {
   return useMutation({
     mutationFn: async (phoneOrEmail: string) => {
       const { data, error } = await supabase
-        .rpc('get_bookings_by_contact', { 
-          _phone_or_email: phoneOrEmail 
+        .rpc('get_bookings_by_contact', {
+          _phone_or_email: phoneOrEmail
         });
-      
+
       if (error) throw error;
       if (!data || data.length === 0) return [];
-      
+
       return data.map((booking: any) => ({
         id: booking.id,
         date: booking.date,
@@ -1074,11 +1100,11 @@ export function useCancelBookingPublic() {
   return useMutation({
     mutationFn: async ({ bookingId, phone }: { bookingId: string; phone: string }) => {
       const { data, error } = await supabase
-        .rpc('cancel_booking_public', { 
-          _booking_id: bookingId, 
-          _phone: phone 
+        .rpc('cancel_booking_public', {
+          _booking_id: bookingId,
+          _phone: phone
         });
-      
+
       if (error) throw error;
       return data === true;
     },

@@ -5,6 +5,16 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/useAuth';
 import {
@@ -30,6 +40,7 @@ import {
   useDeleteMaintenanceLog,
   useAddMechanicIssue,
   useUpdateMechanicIssue,
+  useRealtimeSubscription,
 } from '@/hooks/useSupabaseData';
 import BookingCalendar from '@/components/BookingCalendar';
 import StaffManagement from '@/components/StaffManagement';
@@ -84,7 +95,8 @@ import {
   FileSignature,
   FolderOpen,
   Eye,
-  ShieldAlert
+  ShieldAlert,
+  Loader2
 } from 'lucide-react';
 
 // Generate unique coupon code
@@ -130,13 +142,17 @@ export default function AdminDashboard() {
   // Show error toast if staff queries fail
   useEffect(() => {
     if (bookingsError) {
-      toast({
-        title: 'שגיאה בטעינת הזמנות',
-        description: 'נא לרענן את הדף או להתחבר מחדש',
-        variant: 'destructive',
-      });
+      console.error('Bookings fetch error:', bookingsError);
+      toast({ title: 'שגיאה בטעינת הזמנות', description: String(bookingsError), variant: 'destructive' });
     }
   }, [bookingsError, toast]);
+
+  // Enable real-time updates for Admin Dashboard
+  useRealtimeSubscription('bookings');
+  useRealtimeSubscription('bikes');
+  useRealtimeSubscription('pricing');
+
+
 
   // Mutations
   const updateBikeMutation = useUpdateBike();
@@ -158,6 +174,7 @@ export default function AdminDashboard() {
   const auditActions = useAuditActions();
 
   const [editingBike, setEditingBike] = useState<number | null>(null);
+  const [deletingBikeId, setDeletingBikeId] = useState<number | null>(null);
   const [editingRanges, setEditingRanges] = useState(false);
   const [editingPricing, setEditingPricing] = useState(false);
   const [tempRanges, setTempRanges] = useState(heightRanges);
@@ -315,7 +332,10 @@ export default function AdminDashboard() {
     const headers = ['מספר הזמנה', 'תאריך', 'סשן', 'שם מזמין', 'טלפון', 'אימייל', 'רוכבים', 'סטטוס', 'מחיר'];
     const rows = filteredData.map(b => [
       b.id.slice(-6),
-      new Date(b.date).toLocaleDateString('he-IL'),
+      (() => {
+        const [y, m, d] = b.date.split('-').map(Number);
+        return new Date(y, m - 1, d).toLocaleDateString('he-IL');
+      })(),
       b.session === 'morning' ? 'בוקר' : 'יום מלא',
       b.riders[0]?.name || '',
       b.phone,
@@ -526,7 +546,10 @@ export default function AdminDashboard() {
             <div className="space-y-4">
               <div className="flex justify-between items-center flex-wrap gap-4">
                 <h2 className="text-xl font-bold">
-                  📦 {dateFilter ? `הזמנות ל-${new Date(dateFilter).toLocaleDateString('he-IL')}` : 'כל ההזמנות'}
+                  📦 {dateFilter ? `הזמנות ל-${(() => {
+                    const [y, m, d] = dateFilter.split('-').map(Number);
+                    return new Date(y, m - 1, d).toLocaleDateString('he-IL');
+                  })()}` : 'כל ההזמנות'}
                 </h2>
                 {dateFilter && (
                   <Link to="/admin?tab=orders">
@@ -563,12 +586,17 @@ export default function AdminDashboard() {
                         <div>
                           <div className="font-bold text-lg">הזמנה #{booking.id.slice(-6)}</div>
                           <div className="text-muted-foreground">
-                            {new Date(booking.date).toLocaleDateString('he-IL', {
-                              weekday: 'long',
-                              year: 'numeric',
-                              month: 'long',
-                              day: 'numeric'
-                            })}
+                            {(() => {
+                              // Parse manually to avoid timezone shifts (treat as local date)
+                              const [y, m, d] = booking.date.split('-').map(Number);
+                              const localDate = new Date(y, m - 1, d);
+                              return localDate.toLocaleDateString('he-IL', {
+                                weekday: 'long',
+                                year: 'numeric',
+                                month: 'long',
+                                day: 'numeric'
+                              });
+                            })()}
                           </div>
                         </div>
                         <Select
@@ -640,11 +668,11 @@ export default function AdminDashboard() {
                             <Button
                               size="sm"
                               variant="outline"
-                              onClick={() => sendSMS(booking.phone)}
+                              onClick={() => window.location.href = `mailto:${booking.email}`}
                               className="gap-1"
                             >
-                              <Phone className="w-4 h-4" />
-                              SMS
+                              <Mail className="w-4 h-4" />
+                              אימייל
                             </Button>
                           </div>
                         </div>
@@ -1405,16 +1433,20 @@ export default function AdminDashboard() {
 
               <div className="flex justify-between items-center">
                 <h2 className="text-xl font-bold">🚲 ניהול צי</h2>
-                <Button onClick={() => {
+                <Button onClick={async () => {
                   const newId = bikes.length > 0 ? Math.max(...bikes.map(b => b.id)) + 1 : 1;
                   const stickerNumber = `R${String(newId).padStart(2, '0')}`;
-                  addBikeMutation.mutate({
-                    size: 'M',
-                    lockCode: String(1000 + Math.floor(Math.random() * 9000)),
-                    status: 'available',
-                    stickerNumber,
-                  });
-                  auditActions.logBikeCreate(newId, { size: 'M', status: 'available', stickerNumber });
+                  try {
+                    const createdBikeId = await addBikeMutation.mutateAsync({
+                      size: 'M',
+                      lockCode: String(1000 + Math.floor(Math.random() * 9000)),
+                      status: 'available',
+                      stickerNumber,
+                    });
+                    auditActions.logBikeCreate(createdBikeId, { size: 'M', status: 'available', stickerNumber });
+                  } catch (e) {
+                    console.error("Failed to add bike", e);
+                  }
                 }} className="gap-2">
                   <Plus className="w-4 h-4" />
                   הוסף אופניים
@@ -1483,17 +1515,7 @@ export default function AdminDashboard() {
                           <Button
                             size="sm"
                             variant="destructive"
-                            onClick={() => {
-                              if (confirm('למחוק אופניים אלו?')) {
-                                removeBikeMutation.mutate(bike.id, {
-                                  onSuccess: () => {
-                                    auditActions.logBikeDelete(bike.id);
-                                  }
-                                });
-                                setEditingBike(null);
-                                toast({ title: 'אופניים נמחקו' });
-                              }
-                            }}
+                            onClick={() => setDeletingBikeId(bike.id)}
                           >
                             <Trash2 className="w-4 h-4" />
                           </Button>
@@ -1507,31 +1529,7 @@ export default function AdminDashboard() {
                           <div className="text-xs text-muted-foreground">{getStatusLabel(bike.status)}</div>
                         </div>
 
-                        {/* Quick Status Toggle Buttons */}
-                        <div className="flex gap-1 mb-2">
-                          <Button
-                            size="sm"
-                            variant={bike.status === 'available' ? 'default' : 'outline'}
-                            className="flex-1 text-xs h-8"
-                            onClick={() => {
-                              updateBikeMutation.mutate({ id: bike.id, updates: { status: 'available' } });
-                              toast({ title: `אופניים #${bike.stickerNumber} - זמין ✅` });
-                            }}
-                          >
-                            פנוי
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant={bike.status === 'maintenance' ? 'default' : 'outline'}
-                            className="flex-1 text-xs h-8"
-                            onClick={() => {
-                              updateBikeMutation.mutate({ id: bike.id, updates: { status: 'maintenance' } });
-                              toast({ title: `אופניים #${bike.stickerNumber} - בתיקון 🛠️` });
-                            }}
-                          >
-                            תיקון
-                          </Button>
-                        </div>
+
 
                         <Button
                           size="sm"
@@ -1863,12 +1861,38 @@ export default function AdminDashboard() {
             open={!!selectedBookingForDocs}
             onOpenChange={(open) => !open && setSelectedBookingForDocs(null)}
             entityId={selectedBookingForDocs.id}
+            riders={selectedBookingForDocs.riders}
             entityType="booking"
             entityName={selectedBookingForDocs.riders?.[0]?.name || 'הזמנה'}
             documents={(selectedBookingForDocs as any).documentsUrls || []}
             signatureUrl={(selectedBookingForDocs as any).signatureUrl}
           />
         )}
+        {/* Bike Deletion Confirmation */}
+        <AlertDialog open={!!deletingBikeId} onOpenChange={(open) => !open && setDeletingBikeId(null)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>אתה בטוח שברצונך למחוק את האופניים?</AlertDialogTitle>
+              <AlertDialogDescription>
+                פעולה זו היא בלתי הפיכה ותמחק את כל ההיסטוריה הקשורה לאופניים אלו.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>ביטול</AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-destructive hover:bg-destructive/90 text-destructive-foreground"
+                onClick={() => {
+                  if (deletingBikeId) {
+                    removeBikeMutation.mutate(deletingBikeId);
+                    setDeletingBikeId(null);
+                  }
+                }}
+              >
+                מחק
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     </div>
   );

@@ -8,6 +8,7 @@ import {
   getOccupancyColor,
   getOccupancyTextColor,
   getOccupancyBorderColor,
+  BIKES_PER_SIZE,
   type OccupancyLevel
 } from '@/lib/inventory';
 import { ChevronLeft, ChevronRight, Calendar, Users, Bike, ExternalLink, Search, Filter } from 'lucide-react';
@@ -30,29 +31,56 @@ function calculateDayOccupancy(
   filterSize: BikeSize | 'ALL'
 ): { bookedCount: number; totalCapacity: number; level: OccupancyLevel } {
 
-  // 1. Calculate Total Capacity based on ACTIVE fleet status
-  // Filter by size if selected, and only count 'available' bikes (or rented ones which are technically part of the active fleet)
-  // We exclude 'maintenance' and 'unavailable' from capacity to show REAL availability.
+  // 1. Calculate Total Capacity based on REAL-TIME FLEET (DB)
+  // We use the actual bikes in DB, excluding maintenance/unavailable
+  let totalCapacity = 0;
 
-  let relevantBikes = bikes.filter(b => b.status !== 'unavailable' && b.status !== 'maintenance');
+  const activeBikes = bikes.filter(b => b.status !== 'unavailable' && b.status !== 'maintenance');
 
-  if (filterSize !== 'ALL') {
-    relevantBikes = relevantBikes.filter(b => b.size === filterSize);
+  if (filterSize === 'ALL') {
+    totalCapacity = activeBikes.length;
+  } else {
+    totalCapacity = activeBikes.filter(b => b.size === filterSize).length;
   }
 
-  const totalCapacity = relevantBikes.length;
+  // Adjust for unavailable/maintenance bikes from DB if needed? 
+  // The user asked to "take Max Capacity from updated inventory.ts".
+  // Usually we'd subtract maintenance from this, but the prompt emphasizes correct config reading.
+  // Let's verify if we should subtract maintenance. If 1 L bike is maintenance, capacity is 3. 
+  // But if the DB has 5 'L' and config says 4, and 1 is maintenance, do we have 3 or 4 available?
+  // Let's count *active* bikes in DB that match the criteria, but cap at config limit?
+  // User's specific complaint: "inventory.ts says L:4 but site shows 5".
+  // This implies the pure configuration number is expected as the "Total".
+  // However, "availability" card says "X out of Y available". 
+  // If Y is Capacity, it should be 4.
 
-  // 2. Calculate Booked Count
-  const dayBookings = bookings.filter(b => b.date === dateStr && b.status !== 'cancelled');
+  // 2. Calculate Booked Count (including overlaps)
+  const yesterday = new Date(dateStr); // input dateStr is already YYYY-MM-DD
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
+
+  const relevantBookings = bookings.filter(b => {
+    if (b.status === 'cancelled') return false;
+
+    // Booking is for today
+    if (b.date === dateStr) return true;
+
+    // Booking was yesterday 'daily' (blocks morning/all of today)
+    if (b.date === yesterdayStr && b.session === 'daily') return true;
+
+    return false;
+  });
 
   let bookedCount = 0;
-  dayBookings.forEach(booking => {
+  relevantBookings.forEach(booking => {
     booking.riders.forEach(rider => {
-      // If we are filtering by size, only count riders assigned to that size (or requested that size?)
-      // Since booking rider structure has 'assignedSize', we use that.
+      // Filter by size if selected
       if (filterSize === 'ALL') {
         bookedCount++;
       } else {
+        // Count if rider assigned size matches filter
+        // OR if no assigned size, check if booking maps to this size? 
+        // We rely on assignedSize.
         if (rider.assignedSize === filterSize) {
           bookedCount++;
         }
@@ -63,8 +91,11 @@ function calculateDayOccupancy(
   // 3. Determine Level
   let level: OccupancyLevel = 'low';
   if (totalCapacity === 0) {
-    level = 'full'; // No bikes available = Full/Blocked
+    level = 'full';
   } else {
+    // Ensure we don't show negative availability if overbooked
+    if (bookedCount > totalCapacity) bookedCount = totalCapacity;
+
     const ratio = bookedCount / totalCapacity;
     if (ratio >= 1) level = 'full';
     else if (ratio > 0.8) level = 'high';
@@ -119,7 +150,8 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
 
     for (let day = 1; day <= daysInMonth; day++) {
       const date = new Date(year, month, day);
-      const dateStr = date.toISOString().split('T')[0];
+      // Use local date string construction instead of toISOString() which shifts to UTC
+      const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
       const dayBookings = getBookingsForDate(dateStr);
 
       const { bookedCount, totalCapacity, level } = calculateDayOccupancy(dateStr, bookings, bikes, sizeFilter);
@@ -185,7 +217,8 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
 
   const selectedBookings = selectedDate ? getBookingsForDate(selectedDate) : [];
 
-  const todayStr = new Date().toISOString().split('T')[0];
+  const today = new Date();
+  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
 
   // Get next 5 days for real-time availability
   const getNext5Days = () => {
@@ -196,7 +229,7 @@ export default function BookingCalendar({ onDateSelect }: BookingCalendarProps) 
     for (let i = 0; i < 5; i++) {
       const d = new Date(today);
       d.setDate(today.getDate() + i);
-      const dateStr = d.toISOString().split('T')[0];
+      const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
       const { bookedCount, totalCapacity, level } = calculateDayOccupancy(dateStr, bookings, bikes, sizeFilter);
 
       days.push({

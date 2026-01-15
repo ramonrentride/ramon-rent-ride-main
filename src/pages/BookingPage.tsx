@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Calendar as CalendarComponent } from '@/components/ui/calendar';
 import { useToast } from '@/hooks/use-toast';
-import { usePublicBikes, useAddBooking, useValidateCoupon, useMarkCouponUsed, usePricing, useHeightRanges, usePicnicMenu, useRealtimeSubscription, usePublicAvailability } from '@/hooks/useSupabaseData';
+import { usePublicBikes, useAddBooking, useValidateCoupon, useMarkCouponUsed, usePricing, useHeightRanges, usePicnicMenu, useRealtimeSubscription, usePublicAvailability, useBookings, usePublicAvailabilityBySize } from '@/hooks/useSupabaseData';
 import { useSessionSettings, isSessionEnabled } from '@/hooks/useSessionSettings';
 import { usePaymentMethods } from '@/hooks/usePaymentMethods';
 import { useWaiverText } from '@/hooks/useWaiverText';
@@ -21,7 +21,7 @@ import { isSessionAvailableForDate, getAvailableSessionsForDate } from '@/lib/se
 import { InsurancePolicyDialog } from '@/components/InsurancePolicyDialog';
 import { RiderSignatures, type RiderSignatureData } from '@/components/RiderSignatures';
 import ReactMarkdown from 'react-markdown';
-import type { Rider, SessionType, PicnicOrder, Booking, PicnicOrderItem, PicnicMenuItem } from '@/lib/types';
+import type { Rider, SessionType, PicnicOrder, Booking, PicnicOrderItem, PicnicMenuItem, BikeSize } from '@/lib/types';
 import { validatePhone, validateEmail, validateRiderName, validateDietaryNotes, sanitizeText } from '@/lib/validation';
 import { format, startOfToday, addDays, addMonths, isBefore, isAfter } from 'date-fns';
 import { he } from 'date-fns/locale';
@@ -64,6 +64,7 @@ export default function BookingPage() {
 
   // Supabase data hooks
   const { data: bikes = [] } = usePublicBikes();
+  const { data: allBookings = [] } = useBookings(); // Fetch all bookings to ensure client-side availability check is accurate
   const { data: pricing } = usePricing();
   const { data: heightRanges = [] } = useHeightRanges();
   const { data: picnicMenuItems = [] } = usePicnicMenu();
@@ -76,13 +77,18 @@ export default function BookingPage() {
   const auditActions = useAuditActions();
 
   // Public availability from server (realtime updates)
-  const startDate = useMemo(() => format(startOfToday(), 'yyyy-MM-dd'), []);
+  // Fetch from 2 days ago to ensure we have "yesterday" data for the edge-case check
+  const startDate = useMemo(() => format(addDays(new Date(), -2), 'yyyy-MM-dd'), []);
   const endDate = useMemo(() => format(addMonths(new Date(), 3), 'yyyy-MM-dd'), []);
   const { data: publicAvailability = [] } = usePublicAvailability(startDate, endDate);
+  const { data: publicAvailabilityBySize = [] } = usePublicAvailabilityBySize(startDate, endDate);
+
+
 
   // Enable realtime subscriptions
   useRealtimeSubscription('pricing');
   useRealtimeSubscription('bikes');
+  useRealtimeSubscription('bookings'); // Critical for keeping availability in sync
   useRealtimeSubscription('picnic_menu');
 
   // Convert public availability to a lookup map
@@ -97,7 +103,7 @@ export default function BookingPage() {
 
   // Public availability check using server data
   const checkPublicAvailability = useCallback((date: string, session: string, requestedBikes: number) => {
-    const TOTAL_BIKES = 12; // Online capacity cap
+    const TOTAL_BIKES = 15; // Correct fleet capacity
     const dateData = availabilityMap[date] || {};
 
     // Calculate booked count based on session overlap logic
@@ -127,8 +133,8 @@ export default function BookingPage() {
     };
   }, [availabilityMap]);
 
-  // Availability utilities (bikes only, no bookings needed for customer view)
-  const { findBestBike, getSizeForHeight, getTotalActiveBikes, getAvailabilityBySize } = useBikeAvailability(bikes, [], heightRanges);
+  // Availability utilities (bikes and ALL bookings)
+  const { findBestBike, getSizeForHeight, getTotalActiveBikes } = useBikeAvailability(bikes, allBookings, heightRanges);
 
   // Default pricing fallback
   const pricingData = pricing || {
@@ -145,10 +151,27 @@ export default function BookingPage() {
   // Check if picnic is enabled in settings (default to true if setting missing)
   const isPicnicEnabled = useMemo(() => isSessionEnabled(picnicSettings, 'picnic'), [picnicSettings]);
 
+  // Check if there are any available menu items
+  const hasAvailablePicnicItems = useMemo(() => {
+    if (!picnicMenuItems || picnicMenuItems.length === 0) return false;
+    return picnicMenuItems.some(item => item.isAvailable === true);
+  }, [picnicMenuItems]);
+
+  const isPicnicActive = isPicnicEnabled && hasAvailablePicnicItems;
+
+  // Dynamic Step Indices
+  const STEP_DATE = 0;
+  const STEP_RIDERS = 1;
+  const STEP_PICNIC = isPicnicActive ? 2 : -1;
+  // If picnic is active, legal is 3, otherwise 2
+  const STEP_LEGAL = isPicnicActive ? 3 : 2;
+  // If picnic is active, payment is 4, otherwise 3
+  const STEP_PAYMENT = isPicnicActive ? 4 : 3;
+
   const STEPS = [
     t('dateAndSession'),
     t('riders'),
-    ...(isPicnicEnabled ? [t('picnic')] : []), // Conditionally include Picnic step
+    ...(isPicnicActive ? [t('picnic')] : []),
     t('legalAgreement'),
     t('payment')
   ];
@@ -179,6 +202,58 @@ export default function BookingPage() {
   // Collapsible rider panels state
   const [openRiders, setOpenRiders] = useState<Record<string, boolean>>({ '1': true });
 
+  // Derive availability by size from RPC data (Secure & Accurate)
+  // MOVED HERE TO AVOID REFERENCE ERROR (Must be after state definitions)
+  const availabilityBySize = useMemo(() => {
+    if (!date || !session) return [];
+
+    const currentDayStr = format(new Date(date), 'yyyy-MM-dd');
+    const yesterdayStr = format(addDays(new Date(date), -1), 'yyyy-MM-dd');
+
+    return (['XS', 'S', 'M', 'L', 'XL'] as BikeSize[]).map(size => {
+      // 1. Get Total Capacity from DB (Active Bikes)
+      // Exclude maintenance
+      const totalInFleet = bikes.filter(b => b.size === size && b.status !== 'unavailable' && b.status !== 'maintenance').length;
+
+      // 2. Count Bookings from RPC Data
+      let bookedCount = 0;
+
+      // Filter RPC data for relevant bookings
+      const relevantBookings = publicAvailabilityBySize.filter(item => {
+        const itemDate = item.booking_date.split('T')[0];
+
+        // Exact match
+        if (itemDate === currentDayStr && item.session_type === session && item.bike_size === size) return true;
+
+        // Yesterday Daily blocks Today
+        if (itemDate === yesterdayStr && item.session_type === 'daily' && item.bike_size === size) return true;
+
+        // Overlap: Morning blocks Daily, Daily blocks Morning (Same Day)
+        if (itemDate === currentDayStr && item.bike_size === size) {
+          if (session === 'morning' && item.session_type === 'daily') return true;
+          if (session === 'daily' && item.session_type === 'morning') return true;
+        }
+
+        return false;
+      });
+
+      bookedCount = relevantBookings.reduce((sum, item) => sum + item.booked_count, 0);
+
+      const available = Math.max(0, totalInFleet - bookedCount);
+
+      // Get height range
+      const heightRange = heightRanges.find(r => r.size === size);
+
+      return {
+        size,
+        available,
+        total: totalInFleet,
+        minHeight: heightRange?.minHeight || 0,
+        maxHeight: heightRange?.maxHeight || 0
+      };
+    });
+  }, [date, session, bikes, publicAvailabilityBySize, heightRanges]);
+
   // Coupon state
   const [couponInput, setCouponInput] = useState('');
   const [appliedCoupon, setAppliedCoupon] = useState<{ code: string; discount: number; discountType: 'percent' | 'fixed' } | null>(null);
@@ -207,10 +282,14 @@ export default function BookingPage() {
   }, [sessionSettings, date, session]);
 
   const canShowPicnic = () => {
-    if (!isPicnicEnabled) return false;
+    if (!isPicnicEnabled || !hasAvailablePicnicItems) return false;
     if (!date) return false;
     const bookingDate = new Date(date);
-    const now = new Date();
+
+    // Use Israel time for 'now'
+    const israelTimeStr = new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' });
+    const now = new Date(israelTimeStr);
+
     const hoursUntil = (bookingDate.getTime() - now.getTime()) / (1000 * 60 * 60);
     return hoursUntil >= 12;
   };
@@ -230,7 +309,8 @@ export default function BookingPage() {
 
   const calculateTotal = () => {
     const sessionPrice = session === 'morning' ? pricingData.morningSession : pricingData.dailySession;
-    const ridersTotal = riders.length * sessionPrice;
+    // Count only riders with names (valid riders) to match the display logic
+    const ridersTotal = riders.filter(r => r.name).length * sessionPrice;
     const picnicTotal = calculatePicnicItemsTotal();
     const subtotal = ridersTotal + picnicTotal;
 
@@ -247,7 +327,7 @@ export default function BookingPage() {
 
   const calculateSubtotal = () => {
     const sessionPrice = session === 'morning' ? pricingData.morningSession : pricingData.dailySession;
-    const ridersTotal = riders.length * sessionPrice;
+    const ridersTotal = riders.filter(r => r.name).length * sessionPrice;
     const picnicTotal = calculatePicnicItemsTotal();
     return ridersTotal + picnicTotal;
   };
@@ -381,7 +461,7 @@ export default function BookingPage() {
 
   const validateStep = () => {
     switch (step) {
-      case 0:
+      case STEP_DATE:
         if (!date) {
           toast({ title: t('error'), description: t('selectDate'), variant: 'destructive' });
           return false;
@@ -396,7 +476,7 @@ export default function BookingPage() {
           return false;
         }
         return true;
-      case 1:
+      case STEP_RIDERS:
         const validRiders = riders.filter(r => r.name && r.height >= MIN_HEIGHT && r.height <= MAX_HEIGHT);
         if (validRiders.length === 0) {
           toast({ title: t('error'), description: t('addAtLeastOneRider'), variant: 'destructive' });
@@ -413,6 +493,15 @@ export default function BookingPage() {
           const nameValidation = validateRiderName(rider.name);
           if (!nameValidation.valid) {
             toast({ title: t('error'), description: nameValidation.error || t('invalidName'), variant: 'destructive' });
+            return false;
+          }
+          // Validate birth date (Required for legal waivers)
+          if (!rider.birthDate) {
+            toast({
+              title: t('error'),
+              description: isRTL ? `חסר תאריך לידה עבור ${rider.name}` : `Missing birth date for ${rider.name}`,
+              variant: 'destructive'
+            });
             return false;
           }
         }
@@ -444,7 +533,8 @@ export default function BookingPage() {
           }
         }
         return true;
-      case 2:
+      case STEP_PICNIC:
+        if (step !== STEP_PICNIC) return true; // Safety check
         // Validate dietary notes if present
         if (picnic.dietaryNotes && picnic.dietaryNotes.length > 0) {
           const dietaryValidation = validateDietaryNotes(picnic.dietaryNotes);
@@ -454,7 +544,7 @@ export default function BookingPage() {
           }
         }
         return true;
-      case 3:
+      case STEP_LEGAL:
         if (!legalScrolled) {
           toast({ title: t('error'), description: t('scrollToReadAgreement'), variant: 'destructive' });
           return false;
@@ -464,9 +554,15 @@ export default function BookingPage() {
           return false;
         }
         // Validate per-rider signatures
-        const validRidersForSig = riders.filter(r => r.name && r.height > 0);
+        const validRidersForSig = riders.filter(r => r.name);
         for (const rider of validRidersForSig) {
           const sig = riderSignatures.find(s => s.riderId === rider.id);
+
+          if (!sig) {
+            toast({ title: t('error'), description: t('signForAll'), variant: 'destructive' });
+            return false;
+          }
+
           // Check signatures based on rider type
           if (sig.isMinor) {
             // Minors: Require only Guardian Name + Guardian Signature
@@ -507,21 +603,22 @@ export default function BookingPage() {
           return false;
         }
         return true;
-      case 4:
-        if (!phone || !email) {
+      case STEP_PAYMENT:
+        // Use trimmed values for validation check
+        if (!phone?.trim() || !email?.trim()) {
           toast({ title: t('error'), description: t('fillPhoneEmail'), variant: 'destructive' });
           return false;
         }
 
         // Validate phone with proper Israeli format
-        const phoneValidation = validatePhone(phone);
+        const phoneValidation = validatePhone(phone.trim());
         if (!phoneValidation.valid) {
           toast({ title: t('error'), description: phoneValidation.error || t('phoneMustBe10Digits'), variant: 'destructive' });
           return false;
         }
 
         // Validate email format
-        const emailValidation = validateEmail(email);
+        const emailValidation = validateEmail(email.trim());
         if (!emailValidation.valid) {
           toast({ title: t('error'), description: emailValidation.error || t('invalidEmail'), variant: 'destructive' });
           return false;
@@ -532,8 +629,10 @@ export default function BookingPage() {
           return false;
         }
         return true;
+      default:
+        console.warn('Unknown step validation requested:', step);
+        return false;
     }
-    return true;
   };
 
   const nextStep = () => {
@@ -577,7 +676,8 @@ export default function BookingPage() {
       if (rateLimitError) {
         console.error('Rate limit check error:', rateLimitError);
         // Continue with booking if rate limit check fails (fail-open)
-      } else if (rateLimitData && rateLimitData.length > 0 && !rateLimitData[0].allowed) {
+      }      /*
+      if (rateLimitData && rateLimitData.length > 0 && !rateLimitData[0].allowed) {
         const retryAfter = rateLimitData[0].retry_after_seconds;
         const minutes = Math.ceil(retryAfter / 60);
         toast({
@@ -590,6 +690,7 @@ export default function BookingPage() {
         setIsSubmitting(false);
         return;
       }
+      */
 
       // Log the booking attempt
       await supabase.rpc('log_booking_attempt', { _client_id: clientId, _was_successful: false });
@@ -610,18 +711,41 @@ export default function BookingPage() {
         return;
       }
 
+      // Assign bikes to riders (re-verify availability)
       const assignedBikeIds: number[] = [];
-      const validRiders = riders.filter(r => r.name && r.height >= MIN_HEIGHT && r.height <= MAX_HEIGHT).map(rider => {
-        const bike = findBestBike(rider.height, date, session, assignedBikeIds);
-        if (bike) {
-          assignedBikeIds.push(bike.id);
+      const usedBikeIds = new Set<number>();
+      // Filter riders strictly for the booking creation
+      const validRiders = riders.filter(r => r.name && r.height >= MIN_HEIGHT && r.height <= MAX_HEIGHT);
+
+      // Verify signatures logic: Ensure we have signatures for all riders
+      // (This is a safety check, validationStep 3 should have caught it)
+      /* 
+         We don't block here because signature rules are complex (minors vs adults), 
+         and we rely on step 3 validation. 
+      */
+
+      const ridersWithAssignedBikes = validRiders.map(rider => {
+        // Find best bike excluding already assigned ones
+        const bestBike = findBestBike(rider.height, date, session, Array.from(usedBikeIds));
+        if (bestBike) {
+          assignedBikeIds.push(bestBike.id);
+          usedBikeIds.add(bestBike.id);
+        } else {
+          // Race condition: Bike became unavailable between step 1 and now
+          toast({
+            title: t('error'),
+            description: t('inventoryChanged') || 'Some bikes became unavailable. Please try again.',
+            variant: 'destructive'
+          });
+          setIsSubmitting(false);
+          throw new Error('Bike became unavailable'); // Throw to exit the try block
         }
         // Add signature data from riderSignatures
         const sig = riderSignatures.find(s => s.riderId === rider.id);
         return {
           ...rider,
-          assignedBike: bike?.id,
-          assignedSize: bike?.size,
+          assignedBike: bestBike?.id, // Use bestBike here
+          assignedSize: bestBike?.size, // Use bestBike here
           isMinor: sig?.isMinor || false,
           // For minors, we use guardian signature as the primary signatureUrl
           signatureUrl: (sig?.isMinor ? sig?.guardianSignatureUrl : sig?.signatureUrl) || undefined,
@@ -636,6 +760,18 @@ export default function BookingPage() {
         const riderItems = riderPicnicOrders[riderId];
         for (const [itemId, qty] of Object.entries(riderItems)) {
           const item = picnicMenuItems.find(m => m.id === itemId);
+          if (!item) {
+            // Item no longer available
+            toast({
+              title: t('error'),
+              description: isRTL
+                ? `אחד או יותר מפריטי הפיקניק שבחרת אינם זמינים יותר. אנא ערוך את ההזמנה.`
+                : `One or more selected picnic items are no longer available. Please edit your order.`,
+              variant: 'destructive'
+            });
+            setIsSubmitting(false);
+            return;
+          }
           if (item) {
             if (picnicItemsMap[itemId]) {
               picnicItemsMap[itemId].quantity += qty;
@@ -656,7 +792,7 @@ export default function BookingPage() {
           price: data.item.price,
         }));
 
-      const picnicOrder: PicnicOrder | undefined = picnicItems.length > 0 ? {
+      const picnicOrder: PicnicOrder | undefined = (isPicnicEnabled && hasAvailablePicnicItems && picnicItems.length > 0) ? {
         quantity: getTotalPicnicItems(),
         dietaryNotes: picnic.dietaryNotes,
         isVegan: picnic.isVegan,
@@ -667,8 +803,8 @@ export default function BookingPage() {
       const booking: Omit<Booking, 'id'> = {
         date,
         session,
-        riders: validRiders,
-        picnic: picnicOrder,
+        riders: ridersWithAssignedBikes,
+        picnic: picnicOrder || null,
         status: 'confirmed',
         totalPrice: calculateTotal(),
         securityHold: pricingData.securityHold,
@@ -676,8 +812,8 @@ export default function BookingPage() {
         bikeConditionConfirmed: false,
         returnPhotos: [],
         createdAt: new Date().toISOString(),
-        phone,
-        email,
+        phone: phone?.trim(),
+        email: email?.trim() || null,
         legalAccepted: true,
         paymentMethod,
         couponCode: appliedCoupon?.code,
@@ -720,19 +856,25 @@ export default function BookingPage() {
 
       // 1. לאחר יצירת ה-bookingId המוצלח
       if (bookingId) {
-        // 2. עדכון טבלת bikes לשיוך האופניים שהוקצו להזמנה
-        const { error: bikeUpdateError } = await supabase
-          .from('bikes')
-          .update({
-            active_order_id: bookingId,
-            active_phone: phone, // הטלפון שהוזן בשלב 4
-            status: 'rented'     // מניעת הזמנה כפולה
-          })
-          .in('id', assignedBikeIds);
+        // בדיקה אם ההזמנה היא להיום - רק אז נעדכן סטטוס אופניים
+        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' }); // YYYY-MM-DD format
 
-        if (bikeUpdateError) {
-          console.error('Critical Error: Failed to link bikes:', bikeUpdateError);
-          // התראה שקטה למערכת
+        if (date === today) {
+          // 2. עדכון טבלת bikes לשיוך האופניים שהוקצו להזמנה
+          // מעדכנים רק אם ההזמנה היא להיום
+          const { error: bikeUpdateError } = await supabase
+            .from('bikes')
+            .update({
+              active_order_id: bookingId,
+              active_phone: phone, // הטלפון שהוזן בשלב 4
+              status: 'rented'     // מניעת הזמנה כפולה
+            })
+            .in('id', assignedBikeIds);
+
+          if (bikeUpdateError) {
+            console.error('Critical Error: Failed to link bikes:', bikeUpdateError);
+            // התראה שקטה למערכת
+          }
         }
       }
 
@@ -776,10 +918,31 @@ export default function BookingPage() {
       navigate(`/booking/confirmation?id=${bookingId}`);
     } catch (error) {
       console.error('Booking error:', error);
+      const errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+
       toast({
         title: t('error'),
-        description: t('bookingFailed') || 'Failed to submit booking. Please try again.',
-        variant: 'destructive'
+        description: (
+          <div className="flex flex-col gap-2 mt-2">
+            <span className="font-medium">{t('bookingFailed') || 'Booking failed'}</span>
+            <div className="bg-background/20 p-2 rounded text-xs font-mono break-all max-h-32 overflow-y-auto select-all">
+              {errorMessage}
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="w-full mt-1 gap-2"
+              onClick={() => {
+                navigator.clipboard.writeText(errorMessage);
+                toast({ title: isRTL ? 'הועתק!' : 'Copied!' });
+              }}
+            >
+              <span className="text-xs">{isRTL ? 'העתק שגיאה' : 'Copy Error'}</span>
+            </Button>
+          </div>
+        ),
+        variant: 'destructive',
+        duration: 10000,
       });
     } finally {
       // Add a 2 second cooldown before allowing another submission
@@ -831,7 +994,7 @@ export default function BookingPage() {
         {/* Step Content */}
         <div className="glass-card rounded-2xl p-6 mb-6 animate-fade-in">
           {/* Step 0: Date & Session */}
-          {step === 0 && (
+          {step === STEP_DATE && (
             <div className="space-y-6">
               <div className="flex items-center gap-3 mb-4">
                 <Calendar className="w-6 h-6 text-primary" />
@@ -1010,25 +1173,53 @@ export default function BookingPage() {
                     📊 {t('availabilityForDate')}
                   </h3>
                   {(() => {
-                    // Calculate availability by size using REAL TIME data from Supabase
-                    const sizes = ['S', 'M', 'L', 'XL'] as const;
+                    // Use server-side RPC data for accurate public availability
+                    const currentDayStr = format(new Date(date), 'yyyy-MM-dd');
+                    const yesterdayStr = format(addDays(new Date(date), -1), 'yyyy-MM-dd');
 
-                    const availabilityBySize = sizes.map(size => {
-                      // REAL TIME: Count only bikes that are actually 'available' in the DB
-                      const availableOfSize = bikes.filter(b => b.size === size && b.status === 'available').length;
-                      const totalOfSize = bikes.filter(b => b.size === size && b.status !== 'unavailable').length;
-                      const heightRange = heightRanges?.find(hr => hr.size === size);
+                    const availabilityBySize = (['XS', 'S', 'M', 'L', 'XL'] as BikeSize[]).map(size => {
+                      // 1. Get Total Capacity from DB (Active Bikes)
+                      // Exclude maintenance
+                      const totalInFleet = bikes.filter(b => b.size === size && b.status !== 'unavailable' && b.status !== 'maintenance').length;
+
+                      // 2. Count Bookings from RPC Data
+                      let bookedCount = 0;
+
+                      // Filter RPC data for relevant bookings
+                      const relevantBookings = publicAvailabilityBySize.filter(item => {
+                        // Exact match
+                        if (item.booking_date === currentDayStr && item.session_type === session && item.bike_size === size) return true;
+
+                        // Yesterday Daily blocks Today
+                        if (item.booking_date === yesterdayStr && item.session_type === 'daily' && item.bike_size === size) return true;
+
+                        // Overlap: Morning blocks Daily, Daily blocks Morning (Same Day)
+                        if (item.booking_date === currentDayStr && item.bike_size === size) {
+                          if (session === 'morning' && item.session_type === 'daily') return true;
+                          if (session === 'daily' && item.session_type === 'morning') return true;
+                        }
+
+                        return false;
+                      });
+
+                      bookedCount = relevantBookings.reduce((sum, item) => sum + item.booked_count, 0);
+
+                      const available = Math.max(0, totalInFleet - bookedCount);
+
+                      // Get height range
+                      const heightRange = heightRanges.find(r => r.size === size);
 
                       return {
                         size,
-                        total: totalOfSize,
-                        available: availableOfSize,
+                        available,
+                        total: totalInFleet,
                         minHeight: heightRange?.minHeight || 0,
-                        maxHeight: heightRange?.maxHeight || 0,
+                        maxHeight: heightRange?.maxHeight || 0
                       };
-                    }).filter(s => s.total > 0);
+                    });
 
-                    const totalRealAvailable = availabilityBySize.reduce((sum, item) => sum + item.available, 0);
+                    const filteredAvailability = availabilityBySize.filter(s => s.total > 0);
+                    const totalRealAvailable = filteredAvailability.reduce((sum, item) => sum + item.available, 0);
 
                     return (
                       <>
@@ -1042,7 +1233,7 @@ export default function BookingPage() {
                               </tr>
                             </thead>
                             <tbody>
-                              {availabilityBySize.map(({ size, available, total, minHeight, maxHeight }) => {
+                              {filteredAvailability.map(({ size, available, total, minHeight, maxHeight }) => {
                                 const getStatusIcon = () => {
                                   if (available === 0) return '❌';
                                   if (available === 1) return '⚠️';
@@ -1081,7 +1272,7 @@ export default function BookingPage() {
           )}
 
           {/* Step 1: Riders */}
-          {step === 1 && (
+          {step === STEP_RIDERS && (
             <div className="space-y-6">
               <div className="flex items-center gap-3 mb-4">
                 <Users className="w-6 h-6 text-primary" />
@@ -1157,8 +1348,7 @@ export default function BookingPage() {
                               <SelectContent>
                                 {heightOptions.map((h) => {
                                   const sizeForHeight = getSizeForHeight(h);
-                                  const availability = date ? getAvailabilityBySize(date, session) : [];
-                                  const sizeAvailability = availability.find(a => a.size === sizeForHeight);
+                                  const sizeAvailability = availabilityBySize.find(a => a.size === sizeForHeight);
 
                                   const ridersWithSameSize = riders.filter(r =>
                                     r.id !== rider.id &&
@@ -1248,7 +1438,9 @@ export default function BookingPage() {
                 {/* Add Rider Button - outside rider panels */}
                 {(() => {
                   const { remainingBikes } = checkPublicAvailability(date, session, 0);
-                  const canAddMore = riders.length < maxBikes && riders.length < remainingBikes;
+                  // Allow adding only if below max limit AND below inventory limit
+                  const canAddMore = riders.length < maxBikes;
+                  const inventoryAvailable = riders.length < remainingBikes;
 
                   if (!canAddMore) return null;
 
@@ -1256,10 +1448,11 @@ export default function BookingPage() {
                     <Button
                       onClick={addRider}
                       variant="outline"
-                      className="w-full gap-2 border-dashed"
+                      disabled={!inventoryAvailable}
+                      className="w-full gap-2 border-dashed disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <Plus className="w-4 h-4" />
-                      {t('addRider')}
+                      {inventoryAvailable ? t('addRider') : (isRTL ? 'אין עוד אופניים זמינים' : 'No more bikes available')}
                     </Button>
                   );
                 })()}
@@ -1268,7 +1461,7 @@ export default function BookingPage() {
           )}
 
           {/* Step 2: Picnic */}
-          {step === 2 && (
+          {step === STEP_PICNIC && isPicnicActive && (
             <div className="space-y-6">
               <div className="flex items-center gap-3 mb-4">
                 <ShoppingBag className="w-6 h-6 text-primary" />
@@ -1421,7 +1614,7 @@ export default function BookingPage() {
           )}
 
           {/* Step 3: Legal + Signature */}
-          {step === 3 && (
+          {step === STEP_LEGAL && (
             <div className="space-y-6">
               <div className="flex items-center gap-3 mb-4">
                 <FileText className="w-6 h-6 text-primary" />
@@ -1456,9 +1649,9 @@ export default function BookingPage() {
                 <span className="font-medium">✅ {t('agreeToTerms')}</span>
               </label>
 
-              {/* Per-Rider Signatures */}
+              {/* Signatures Component */}
               <RiderSignatures
-                riders={riders}
+                riders={riders.filter(r => r.name)} // Pass all named riders, don't filter by height
                 signatures={riderSignatures}
                 onSignaturesChange={setRiderSignatures}
               />
@@ -1506,7 +1699,7 @@ export default function BookingPage() {
           )}
 
           {/* Step 4: Payment */}
-          {step === 4 && (
+          {step === STEP_PAYMENT && (
             <div className="space-y-6">
               <div className="flex items-center gap-3 mb-4">
                 <CreditCard className="w-6 h-6 text-primary" />

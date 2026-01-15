@@ -13,6 +13,16 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import {
   Table,
   TableBody,
   TableCell,
@@ -72,6 +82,7 @@ export default function PicnicMenuManagement() {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<PicnicMenuItem | null>(null);
   const [formData, setFormData] = useState<MenuItemFormData>(emptyFormData);
+  const [deletingItemId, setDeletingItemId] = useState<string | null>(null);
 
   const resetForm = () => {
     setFormData(emptyFormData);
@@ -79,8 +90,8 @@ export default function PicnicMenuManagement() {
   };
 
   const handleAddItem = async () => {
-    if (!formData.name || !formData.nameHe || formData.price <= 0) {
-      toast({ title: 'שגיאה', description: 'יש למלא שם ומחיר', variant: 'destructive' });
+    if (!formData.name || !formData.nameHe || formData.price < 0) {
+      toast({ title: 'שגיאה', description: 'יש למלא שם ומחיר תקין', variant: 'destructive' });
       return;
     }
 
@@ -94,8 +105,8 @@ export default function PicnicMenuManagement() {
   };
 
   const handleEditItem = async () => {
-    if (!editingItem || !formData.name || !formData.nameHe) {
-      toast({ title: 'שגיאה', description: 'יש למלא שם', variant: 'destructive' });
+    if (!editingItem || !formData.name || !formData.nameHe || formData.price < 0) {
+      toast({ title: 'שגיאה', description: 'יש למלא שם ומחיר תקין', variant: 'destructive' });
       return;
     }
 
@@ -112,10 +123,15 @@ export default function PicnicMenuManagement() {
   };
 
   const handleDeleteItem = async (id: string) => {
-    if (!confirm('האם אתה בטוח שברצונך למחוק פריט זה?')) return;
+    setDeletingItemId(id);
+  };
+
+  const confirmDelete = async () => {
+    if (!deletingItemId) return;
 
     try {
-      await deleteItemMutation.mutateAsync(id);
+      await deleteItemMutation.mutateAsync(deletingItemId);
+      setDeletingItemId(null);
     } catch (error) {
       console.error('Error deleting item:', error);
     }
@@ -364,6 +380,26 @@ export default function PicnicMenuManagement() {
           </div>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={!!deletingItemId} onOpenChange={(open) => !open && setDeletingItemId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>מחיקת פריט מהתפריט</AlertDialogTitle>
+            <AlertDialogDescription>
+              האם אתה בטוח שברצונך למחוק פריט זה? הפעולה לא ניתנת לביטול.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>ביטול</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive hover:bg-destructive/90 text-destructive-foreground"
+              onClick={confirmDelete}
+            >
+              מחק
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
