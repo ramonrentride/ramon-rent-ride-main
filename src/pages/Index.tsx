@@ -14,17 +14,17 @@ import { iconComponents } from '@/components/admin/editors/IconPicker';
 import { PreLaunchBanner } from '@/components/PreLaunchBanner';
 import { WaitingListDialog } from '@/components/WaitingListDialog';
 import { usePreLaunchMode } from '@/hooks/usePreLaunchMode';
-import heroImage from '@/assets/hero-crater.jpg';
-import natureBg from '@/assets/nature-bg.jpg';
 
-// Default fallbacks
-import animalIbex from '@/assets/animal-ibex.jpg';
-import animalVulture from '@/assets/animal-vulture.jpg';
-import animalEagle from '@/assets/animal-eagle.jpg';
-import animalFox from '@/assets/animal-fox.jpg';
-import desertCycling from '@/assets/desert-cycling.jpg';
-import desertTrail from '@/assets/desert-trail.jpg';
-import desertSunset from '@/assets/desert-sunset.jpg';
+// Images served statically from public/assets
+const heroImage = '/assets/hero-crater.jpg';
+const natureBg = '/assets/nature-bg.jpg';
+const animalIbex = '/assets/animal-ibex.jpg';
+const animalVulture = '/assets/animal-vulture.jpg';
+const animalEagle = '/assets/animal-eagle.jpg';
+const animalFox = '/assets/animal-fox.jpg';
+const desertCycling = '/assets/desert-cycling.jpg';
+const desertTrail = '/assets/desert-trail.jpg';
+const desertSunset = '/assets/desert-sunset.jpg';
 
 const Index = () => {
   const { t, isRTL } = useI18n();

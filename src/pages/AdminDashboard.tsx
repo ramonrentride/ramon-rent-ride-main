@@ -301,6 +301,53 @@ export default function AdminDashboard() {
     return bookings;
   }, [bookings, dateFilter]);
 
+  // Sorting Logic
+  const [sortConfig, setSortConfig] = useState<{ key: 'date' | 'name' | 'phone' | 'email'; direction: 'asc' | 'desc' }>({ key: 'date', direction: 'desc' });
+  const [searchQuery, setSearchQuery] = useState('');
+
+  // 1. Filter by Date (Base) - already done in filteredBookings
+
+  // 2. Filter by Search Query
+  const searchedBookings = useMemo(() => {
+    if (!searchQuery.trim()) return filteredBookings;
+
+    const lower = searchQuery.toLowerCase();
+    return filteredBookings.filter(b =>
+      b.riders.some(r => r.name?.toLowerCase().includes(lower)) ||
+      (b.phone && b.phone.includes(lower)) ||
+      (b.email && b.email.toLowerCase().includes(lower)) ||
+      b.id.toLowerCase().includes(lower)
+    );
+  }, [filteredBookings, searchQuery]);
+
+  // 3. Sort the Results
+  const sortedBookings = useMemo(() => {
+    const sorted = [...searchedBookings];
+    sorted.sort((a, b) => {
+      let comparison = 0;
+
+      switch (sortConfig.key) {
+        case 'date':
+          comparison = a.date.localeCompare(b.date);
+          break;
+        case 'name':
+          const nameA = a.riders[0]?.name || '';
+          const nameB = b.riders[0]?.name || '';
+          comparison = nameA.localeCompare(nameB);
+          break;
+        case 'phone':
+          comparison = (a.phone || '').localeCompare(b.phone || '');
+          break;
+        case 'email':
+          comparison = (a.email || '').localeCompare(b.email || '');
+          break;
+      }
+
+      return sortConfig.direction === 'asc' ? comparison : -comparison;
+    });
+    return sorted;
+  }, [searchedBookings, sortConfig]);
+
   const stats = {
     totalRiders: todayBookings.reduce((sum, b) => sum + b.riders.length, 0),
     fullDay: todayBookings.filter(b => b.session === 'daily').length,
@@ -560,26 +607,75 @@ export default function AdminDashboard() {
                 )}
               </div>
 
-              {/* Export Buttons */}
-              <div className="flex gap-2 flex-wrap">
-                <Button variant="outline" onClick={() => exportToExcel('daily')} className="gap-2">
-                  <FileSpreadsheet className="w-4 h-4" />
-                  ייצוא יומי
-                </Button>
-                <Button variant="outline" onClick={() => exportToExcel('weekly')} className="gap-2">
-                  <Download className="w-4 h-4" />
-                  ייצוא שבועי
-                </Button>
+              {/* Controls: Export, Search & Sort */}
+              <div className="flex flex-col xl:flex-row gap-4 justify-between items-start xl:items-center">
+                <div className="flex gap-2 flex-wrap">
+                  <Button variant="outline" onClick={() => exportToExcel('daily')} className="gap-2">
+                    <FileSpreadsheet className="w-4 h-4" />
+                    ייצוא יומי
+                  </Button>
+                  <Button variant="outline" onClick={() => exportToExcel('weekly')} className="gap-2">
+                    <Download className="w-4 h-4" />
+                    ייצוא שבועי
+                  </Button>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-2 w-full xl:w-auto">
+                  {/* Search Input */}
+                  <div className="relative">
+                    <input
+                      type="text"
+                      placeholder="חיפוש לפי שם, טלפון, אימייל..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="h-9 w-full sm:w-[250px] rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    />
+                    {searchQuery && (
+                      <button
+                        onClick={() => setSearchQuery('')}
+                        className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                      >
+                        <XCircle className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Sort Dropdown */}
+                  <div className="flex items-center gap-2 bg-muted/40 p-1.5 rounded-lg shrink-0">
+                    <Label className="text-sm font-medium whitespace-nowrap px-1">מיון לפי:</Label>
+                    <Select
+                      value={`${sortConfig.key}-${sortConfig.direction}`}
+                      onValueChange={(val) => {
+                        const [key, direction] = val.split('-');
+                        setSortConfig({ key: key as any, direction: direction as any });
+                      }}
+                    >
+                      <SelectTrigger className="w-[180px] h-9 bg-background">
+                        <SelectValue placeholder="בחר מיון" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="date-desc">תאריך (מהחדש לישן)</SelectItem>
+                        <SelectItem value="date-asc">תאריך (מהישן לחדש)</SelectItem>
+                        <SelectItem value="name-asc">שם מזמין (א-ת)</SelectItem>
+                        <SelectItem value="name-desc">שם מזמין (ת-א)</SelectItem>
+                        <SelectItem value="phone-asc">טלפון (עולה)</SelectItem>
+                        <SelectItem value="email-asc">אימייל (א-ת)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
               </div>
 
-              {filteredBookings.length === 0 ? (
+              {sortedBookings.length === 0 ? (
                 <div className="glass-card rounded-xl p-8 text-center">
                   <ClipboardList className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
-                  <p className="text-muted-foreground">אין הזמנות {dateFilter ? 'לתאריך זה' : 'עדיין'}</p>
+                  <p className="text-muted-foreground">
+                    {searchQuery ? 'לא נמצאו הזמנות תואמות לחיפוש' : `אין הזמנות ${dateFilter ? 'לתאריך זה' : 'עדיין'}`}
+                  </p>
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {filteredBookings.map(booking => (
+                  {sortedBookings.map(booking => (
                     <div key={booking.id} className="glass-card rounded-xl p-6">
                       {/* Header */}
                       <div className="flex justify-between items-start mb-4">

@@ -8,7 +8,7 @@ export const ONLINE_AVAILABLE_CAP = 15; // Base capacity, but real availability 
 // Legacy alias for backwards compatibility
 export const TOTAL_BIKES = ONLINE_AVAILABLE_CAP;
 
-// Bikes per size - approximate distribution for reference (actual source of truth is DB)
+// Bikes per size - HARD INVENTORY (Rule of Iron)
 export const BIKES_PER_SIZE: Record<BikeSize, number> = {
   XS: 0,
   S: 4,

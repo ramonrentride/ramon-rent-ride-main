@@ -903,6 +903,38 @@ export function useDeleteMechanicIssue() {
   });
 }
 
+// ============= PUBLIC INVENTORY CAPACITY (Dynamic) =============
+
+export interface PublicInventoryCapacity {
+  bikeSize: BikeSize;
+  totalCapacity: number;
+}
+
+export function usePublicInventoryCapacity() {
+  const queryClient = useQueryClient();
+
+  return useQuery({
+    queryKey: ['publicInventoryCapacity'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .rpc('get_public_inventory_capacity');
+
+      if (error) {
+        console.warn('Error fetching inventory capacity (using fallback):', error);
+        // Do not throw, return empty to trigger fallback logic in component
+        return [];
+      }
+
+      return (data || []).map((row: any): PublicInventoryCapacity => ({
+        bikeSize: row.bike_size as BikeSize,
+        totalCapacity: row.total_capacity,
+      }));
+    },
+    staleTime: 60000,
+    refetchOnWindowFocus: true
+  });
+}
+
 // ============= PUBLIC AVAILABILITY (for customers) =============
 
 export interface PublicAvailabilityData {

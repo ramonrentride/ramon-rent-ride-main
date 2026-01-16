@@ -24,35 +24,27 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
 // Dynamic occupancy calculation
-function calculateDayOccupancy(
+export function calculateDayOccupancy(
   dateStr: string,
   bookings: Booking[],
   bikes: any[], // Type is implied from useBikes
   filterSize: BikeSize | 'ALL'
 ): { bookedCount: number; totalCapacity: number; level: OccupancyLevel } {
 
-  // 1. Calculate Total Capacity based on REAL-TIME FLEET (DB)
-  // We use the actual bikes in DB, excluding maintenance/unavailable
+  // 1. Calculate Total Capacity DYNAMICALLY from fleet status
+  // Used as the "Max" for availability calculations
   let totalCapacity = 0;
 
-  const activeBikes = bikes.filter(b => b.status !== 'unavailable' && b.status !== 'maintenance');
+  // Filter ONLY active rentable bikes (exclude maintenance/unavailable)
+  const activeBikes = bikes.filter(b => b.status !== 'maintenance' && b.status !== 'unavailable');
 
   if (filterSize === 'ALL') {
+    // Sum of all active bikes in the DB
     totalCapacity = activeBikes.length;
   } else {
+    // Exact count for the selected size from DB
     totalCapacity = activeBikes.filter(b => b.size === filterSize).length;
   }
-
-  // Adjust for unavailable/maintenance bikes from DB if needed? 
-  // The user asked to "take Max Capacity from updated inventory.ts".
-  // Usually we'd subtract maintenance from this, but the prompt emphasizes correct config reading.
-  // Let's verify if we should subtract maintenance. If 1 L bike is maintenance, capacity is 3. 
-  // But if the DB has 5 'L' and config says 4, and 1 is maintenance, do we have 3 or 4 available?
-  // Let's count *active* bikes in DB that match the criteria, but cap at config limit?
-  // User's specific complaint: "inventory.ts says L:4 but site shows 5".
-  // This implies the pure configuration number is expected as the "Total".
-  // However, "availability" card says "X out of Y available". 
-  // If Y is Capacity, it should be 4.
 
   // 2. Calculate Booked Count (including overlaps)
   const yesterday = new Date(dateStr); // input dateStr is already YYYY-MM-DD
@@ -79,9 +71,9 @@ function calculateDayOccupancy(
         bookedCount++;
       } else {
         // Count if rider assigned size matches filter
-        // OR if no assigned size, check if booking maps to this size? 
-        // We rely on assignedSize.
-        if (rider.assignedSize === filterSize) {
+        // OR if no assigned size, we must count it pessimistically (Ghost Booking)
+        // because it consumes a bike from the total pool, reducing availability for everyone.
+        if (rider.assignedSize === filterSize || !rider.assignedSize) {
           bookedCount++;
         }
       }

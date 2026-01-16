@@ -9,13 +9,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Calendar as CalendarComponent } from '@/components/ui/calendar';
 import { useToast } from '@/hooks/use-toast';
-import { usePublicBikes, useAddBooking, useValidateCoupon, useMarkCouponUsed, usePricing, useHeightRanges, usePicnicMenu, useRealtimeSubscription, usePublicAvailability, useBookings, usePublicAvailabilityBySize } from '@/hooks/useSupabaseData';
+import { usePublicBikes, useAddBooking, useValidateCoupon, useMarkCouponUsed, usePricing, useHeightRanges, usePicnicMenu, useRealtimeSubscription, usePublicAvailability, useBookings, usePublicAvailabilityBySize, usePublicInventoryCapacity } from '@/hooks/useSupabaseData';
 import { useSessionSettings, isSessionEnabled } from '@/hooks/useSessionSettings';
 import { usePaymentMethods } from '@/hooks/usePaymentMethods';
 import { useWaiverText } from '@/hooks/useWaiverText';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuditActions } from '@/hooks/useAuditLog';
 import { useBikeAvailability } from '@/hooks/useBikeAvailability';
+import { BIKES_PER_SIZE } from '@/lib/inventory';
+import { calculateDayOccupancy } from '@/components/BookingCalendar';
 import { useI18n } from '@/lib/i18n';
 import { isSessionAvailableForDate, getAvailableSessionsForDate } from '@/lib/sessionValidation';
 import { InsurancePolicyDialog } from '@/components/InsurancePolicyDialog';
@@ -76,6 +78,10 @@ export default function BookingPage() {
   const markCouponUsedMutation = useMarkCouponUsed();
   const auditActions = useAuditActions();
 
+  // Fetch dynamic capacity (maintenance-aware) - MOVED HERE TO FIX HOISTING
+  // RPC bypassed due to migration failure - using client-side calculation from 'bikes'
+  // const { data: publicInventory, isLoading: isInventoryLoading } = usePublicInventoryCapacity();
+
   // Public availability from server (realtime updates)
   // Fetch from 2 days ago to ensure we have "yesterday" data for the edge-case check
   const startDate = useMemo(() => format(addDays(new Date(), -2), 'yyyy-MM-dd'), []);
@@ -101,9 +107,15 @@ export default function BookingPage() {
     return map;
   }, [publicAvailability]);
 
+  // Dynamic Total Fleet Calculation (sum of all sizes)
+  // CLIENT-SIDE FIX: Use 'bikes' array directly
+  const totalActiveFleet = useMemo(() => {
+    if (!bikes || bikes.length === 0) return 15; // Optimistic fallback if bikes not loaded yet
+    return bikes.filter(b => b.status !== 'maintenance' && b.status !== 'unavailable').length;
+  }, [bikes]);
+
   // Public availability check using server data
   const checkPublicAvailability = useCallback((date: string, session: string, requestedBikes: number) => {
-    const TOTAL_BIKES = 15; // Correct fleet capacity
     const dateData = availabilityMap[date] || {};
 
     // Calculate booked count based on session overlap logic
@@ -126,12 +138,12 @@ export default function BookingPage() {
       bookedCount += dateData['morning'];
     }
 
-    const remainingBikes = Math.max(0, TOTAL_BIKES - bookedCount);
+    const remainingBikes = Math.max(0, totalActiveFleet - bookedCount);
     return {
       available: requestedBikes <= remainingBikes,
       remainingBikes,
     };
-  }, [availabilityMap]);
+  }, [availabilityMap, totalActiveFleet]);
 
   // Availability utilities (bikes and ALL bookings)
   const { findBestBike, getSizeForHeight, getTotalActiveBikes } = useBikeAvailability(bikes, allBookings, heightRanges);
@@ -204,18 +216,248 @@ export default function BookingPage() {
 
   // Derive availability by size from RPC data (Secure & Accurate)
   // MOVED HERE TO AVOID REFERENCE ERROR (Must be after state definitions)
+  // REFACTOR: Hybrid Calculation (RPC + Pessimistic Ghosts)
+  // 'allBookings' is blocked by RLS for public, so we MUST use 'availabilityMap' (RPC) which works for the Calendar.
+  // REFACTOR: Hybrid Calculation (RPC + Pessimistic Ghosts) - FINAL FIX
+  // 'allBookings' is blocked by RLS for public, so we MUST use 'availabilityMap' (RPC) which works for the DatePicker.
+  // Fetch dynamic capacity (maintenance-aware) MOVED TO TOP
+  //  const { data: publicInventory, isLoading: isInventoryLoading } = usePublicInventoryCapacity();
+
+  // REFACTOR: Hybrid Calculation (RPC + Pessimistic Ghosts) - FINAL ROBUST FIX
+  // 'allBookings' is blocked by RLS for public users, causing visual availability when stock is full.
+  // We MUST use the RPC data ('availabilityMap') which is the trusted source of truth for total counts.
   const availabilityBySize = useMemo(() => {
     if (!date || !session) return [];
 
     const currentDayStr = format(new Date(date), 'yyyy-MM-dd');
     const yesterdayStr = format(addDays(new Date(date), -1), 'yyyy-MM-dd');
 
-    return (['XS', 'S', 'M', 'L', 'XL'] as BikeSize[]).map(size => {
-      // 1. Get Total Capacity from DB (Active Bikes)
-      // Exclude maintenance
-      const totalInFleet = bikes.filter(b => b.size === size && b.status !== 'unavailable' && b.status !== 'maintenance').length;
+    // 1. Get Total Bookings for this slot from the Accurate RPC Map (Source of Truth for "Full")
+    const dateData = availabilityMap[currentDayStr] || {};
+    let totalSlotUsage = dateData[session] || 0;
 
-      // 2. Count Bookings from RPC Data
+    // Check overlap from yesterday
+    const yesterdayData = availabilityMap[yesterdayStr] || {};
+    if (yesterdayData['daily']) totalSlotUsage += yesterdayData['daily'];
+
+    // Check overlap from today (Morning vs Daily)
+    if (session === 'morning' && dateData['daily']) totalSlotUsage += dateData['daily'];
+    if (session === 'daily' && dateData['morning']) totalSlotUsage += dateData['morning'];
+
+    return (['XS', 'S', 'M', 'L', 'XL'] as BikeSize[]).map(size => {
+      // DYNAMIC INVENTORY: Client-side calculation from 'bikes'
+      // Count active bikes of this size directly from the loaded array
+      // Safety: check if bikes is null/undefined before filtering
+      const totalInFleet = (bikes || []).filter(b => b.size === size && b.status !== 'maintenance' && b.status !== 'unavailable').length;
+
+      // 2. Count Specific Usage (RPC By Size)
+      const relevantBookings = publicAvailabilityBySize.filter(item => {
+        const itemDate = item.booking_date.split('T')[0];
+        // Exact match
+        if (itemDate === currentDayStr && item.session_type === session && item.bike_size === size) return true;
+        // Yesterday Daily
+        if (itemDate === yesterdayStr && item.session_type === 'daily' && item.bike_size === size) return true;
+        // Overlap
+        if (itemDate === currentDayStr) {
+          if (session === 'morning' && item.session_type === 'daily') return true;
+          if (session === 'daily' && item.session_type === 'morning') return true;
+        }
+        return false;
+      });
+
+      const knownSizeCount = relevantBookings.reduce((sum, item) => sum + item.booked_count, 0);
+
+      // 3. Count Total Known Usage across ALL sizes
+      // We need to compare "Total Slot Usage" (RPC Global) vs "Sum of All Specifics" (RPC Detailed)
+      const allSpecificUsage = publicAvailabilityBySize.filter(item => {
+        const itemDate = item.booking_date.split('T')[0];
+        // Any size, same slot logic
+        if (itemDate === currentDayStr && item.session_type === session) return true;
+        if (itemDate === yesterdayStr && item.session_type === 'daily') return true;
+        if (itemDate === currentDayStr) {
+          if (session === 'morning' && item.session_type === 'daily') return true;
+          if (session === 'daily' && item.session_type === 'morning') return true;
+        }
+        return false;
+      }).reduce((sum, item) => sum + item.booked_count, 0);
+
+      // 4. Ghost Difference
+      // If Global says 15, but Specific says 3, then 12 are Ghosts.
+      // Ghost riders consume capacity from EVERY size because we don't know who they are.
+      const ghostRiders = Math.max(0, totalSlotUsage - allSpecificUsage);
+
+      // 5. Available = Capacity - Known - Ghosts
+      const available = Math.max(0, totalInFleet - knownSizeCount - ghostRiders);
+
+      const heightRange = heightRanges.find(r => r.size === size);
+
+      return {
+        size,
+        available,
+        total: totalInFleet,
+        minHeight: heightRange?.minHeight || 0,
+        maxHeight: heightRange?.maxHeight || 0
+      };
+    });
+  }, [date, session, availabilityMap, publicAvailabilityBySize, heightRanges, bikes]);
+
+  /* // OLD LOGIC (Hybrid RPC - kept for safety/reference but unused)
+  const availabilityBySize_OLD = useMemo(() => {
+    if (!date || !session) return [];
+
+    const currentDayStr = format(new Date(date), 'yyyy-MM-dd');
+    const yesterdayStr = format(addDays(new Date(date), -1), 'yyyy-MM-dd');
+
+    // 1. Get Total Bookings for this slot from the Accurate RPC Map (Source of Truth for "Full")
+    const dateData = availabilityMap[currentDayStr] || {};
+    let totalSlotUsage = dateData[session] || 0;
+
+    // Check overlap from yesterday
+    const yesterdayData = availabilityMap[yesterdayStr] || {};
+    if (yesterdayData['daily']) totalSlotUsage += yesterdayData['daily'];
+
+    // Check overlap from today (Morning vs Daily)
+    if (session === 'morning' && dateData['daily']) totalSlotUsage += dateData['daily'];
+    if (session === 'daily' && dateData['morning']) totalSlotUsage += dateData['morning'];
+
+    return (['XS', 'S', 'M', 'L', 'XL'] as BikeSize[]).map(size => {
+      const totalInFleet = BIKES_PER_SIZE[size];
+
+      // 2. Count Specific Usage (RPC By Size)
+      const relevantBookings = publicAvailabilityBySize.filter(item => {
+        const itemDate = item.booking_date.split('T')[0];
+        // Exact match
+        if (itemDate === currentDayStr && item.session_type === session && item.bike_size === size) return true;
+        // Yesterday Daily
+        if (itemDate === yesterdayStr && item.session_type === 'daily' && item.bike_size === size) return true;
+        // Overlap
+        if (itemDate === currentDayStr) {
+          if (session === 'morning' && item.session_type === 'daily') return true;
+          if (session === 'daily' && item.session_type === 'morning') return true;
+        }
+        return false;
+      });
+
+      const knownSizeCount = relevantBookings.reduce((sum, item) => sum + item.booked_count, 0);
+
+      // 3. Count Total Known Usage across ALL sizes
+      // We need to compare "Total Slot Usage" (RPC Global) vs "Sum of All Specifics" (RPC Detailed)
+      const allSpecificUsage = publicAvailabilityBySize.filter(item => {
+        const itemDate = item.booking_date.split('T')[0];
+        // Any size, same slot logic
+        if (itemDate === currentDayStr && item.session_type === session) return true;
+        if (itemDate === yesterdayStr && item.session_type === 'daily') return true;
+        if (itemDate === currentDayStr) {
+          if (session === 'morning' && item.session_type === 'daily') return true;
+          if (session === 'daily' && item.session_type === 'morning') return true;
+        }
+        return false;
+      }).reduce((sum, item) => sum + item.booked_count, 0);
+
+      // 4. Ghost Difference
+      // If Global says 15, but Specific says 3, then 12 are Ghosts.
+      // Ghost riders consume capacity from EVERY size because we don't know who they are.
+      const ghostRiders = Math.max(0, totalSlotUsage - allSpecificUsage);
+
+      // 5. Available = Capacity - Known - Ghosts
+      const available = Math.max(0, totalInFleet - knownSizeCount - ghostRiders);
+
+      const heightRange = heightRanges.find(r => r.size === size);
+
+      return {
+        size,
+        available,
+        total: totalInFleet,
+        minHeight: heightRange?.minHeight || 0,
+        maxHeight: heightRange?.maxHeight || 0
+      };
+    });
+  }, [date, session, availabilityMap, publicAvailabilityBySize, heightRanges]); */
+
+  /* // OLD LOGIC (Hybrid RPC - kept for safety/reference but unused)
+  const availabilityBySize_OLD = useMemo(() => {
+    if (!date || !session) return [];
+
+    const currentDayStr = format(new Date(date), 'yyyy-MM-dd');
+    const yesterdayStr = format(addDays(new Date(date), -1), 'yyyy-MM-dd');
+
+    // 1. Get Total Bookings for this slot from the Accurate RPC Map
+    const dateData = availabilityMap[currentDayStr] || {};
+    let totalSlotUsage = dateData[session] || 0;
+
+    // Check overlap from yesterday
+    const yesterdayData = availabilityMap[yesterdayStr] || {};
+    if (yesterdayData['daily']) totalSlotUsage += yesterdayData['daily'];
+
+    // Check overlap from today (Morning vs Daily)
+    if (session === 'morning' && dateData['daily']) totalSlotUsage += dateData['daily'];
+    if (session === 'daily' && dateData['morning']) totalSlotUsage += dateData['morning'];
+
+    return (['XS', 'S', 'M', 'L', 'XL'] as BikeSize[]).map(size => {
+      const totalInFleet = BIKES_PER_SIZE[size];
+
+      // 2. Count Specific Usage (RPC By Size)
+      const relevantBookings = publicAvailabilityBySize.filter(item => {
+        const itemDate = item.booking_date.split('T')[0];
+        // Exact match
+        if (itemDate === currentDayStr && item.session_type === session && item.bike_size === size) return true;
+        // Yesterday Daily
+        if (itemDate === yesterdayStr && item.session_type === 'daily' && item.bike_size === size) return true;
+        // Overlap
+        if (itemDate === currentDayStr) {
+          if (session === 'morning' && item.session_type === 'daily') return true;
+          if (session === 'daily' && item.session_type === 'morning') return true;
+        }
+        return false;
+      });
+
+      const knownSizeCount = relevantBookings.reduce((sum, item) => sum + item.booked_count, 0);
+
+      // 3. Count Total Known Usage across ALL sizes
+      // We need to compare "Total Slot Usage" (RPC Global) vs "Sum of All Specifics" (RPC Detailed)
+      const allSpecificUsage = publicAvailabilityBySize.filter(item => {
+        const itemDate = item.booking_date.split('T')[0];
+        // Any size, same slot logic
+        if (itemDate === currentDayStr && item.session_type === session) return true;
+        if (itemDate === yesterdayStr && item.session_type === 'daily') return true;
+        if (itemDate === currentDayStr) {
+          if (session === 'morning' && item.session_type === 'daily') return true;
+          if (session === 'daily' && item.session_type === 'morning') return true;
+        }
+        return false;
+      }).reduce((sum, item) => sum + item.booked_count, 0);
+
+      // 4. Ghost Difference
+      // If Global says 15, but Specific says 3, then 12 are Ghosts.
+      const ghostRiders = Math.max(0, totalSlotUsage - allSpecificUsage);
+
+      // 5. Available = Capacity - Known - Ghosts
+      const available = Math.max(0, totalInFleet - knownSizeCount - ghostRiders);
+
+      const heightRange = heightRanges.find(r => r.size === size);
+
+      return {
+        size,
+        available,
+        total: totalInFleet,
+        minHeight: heightRange?.minHeight || 0,
+        maxHeight: heightRange?.maxHeight || 0
+      };
+    });
+  }, [date, session, availabilityMap, publicAvailabilityBySize, heightRanges]); */
+
+  /* // OLD LOGIC (Kept to avoid syntax errors during swap, but unused)
+  const availabilityBySize_OLD = useMemo(() => {
+    if (!date || !session) return [];
+
+    const currentDayStr = format(new Date(date), 'yyyy-MM-dd');
+    const yesterdayStr = format(addDays(new Date(date), -1), 'yyyy-MM-dd');
+
+    return (['XS', 'S', 'M', 'L', 'XL'] as BikeSize[]).map(size => {
+      // 1. Get Total Capacity from HARD INVENTORY (inventory.ts)
+      const totalInFleet = BIKES_PER_SIZE[size];
+
+      // 2. Count Bookings from RPC Data (Specific confirmed sizes)
       let bookedCount = 0;
 
       // Filter RPC data for relevant bookings
@@ -239,7 +481,36 @@ export default function BookingPage() {
 
       bookedCount = relevantBookings.reduce((sum, item) => sum + item.booked_count, 0);
 
-      const available = Math.max(0, totalInFleet - bookedCount);
+      // 3. PESSIMISTIC SYNC: Account for "Ghost Bookings"
+      // If validation says "15 booked" but we only see "3 assigned", we must assume the other 12 are taking valid spots!
+
+      // Calculate Total General Bookings for this slot (from the generic accurate availabilityMap)
+      const dateData = availabilityMap[currentDayStr] || {};
+      let generalBookedCount = dateData[session] || 0;
+
+      const yesterdayData = availabilityMap[yesterdayStr] || {};
+      if (yesterdayData['daily']) generalBookedCount += yesterdayData['daily'];
+      if (session === 'morning' && dateData['daily']) generalBookedCount += dateData['daily'];
+      if (session === 'daily' && dateData['morning']) generalBookedCount += dateData['morning'];
+
+      // Sum of ALL specific size bookings we found for this slot
+      const totalSpecificBookings = publicAvailabilityBySize
+        .filter(item => {
+          const itemDate = item.booking_date.split('T')[0];
+          if (itemDate === currentDayStr && item.session_type === session) return true;
+          if (itemDate === yesterdayStr && item.session_type === 'daily') return true;
+          if (itemDate === currentDayStr) {
+            if (session === 'morning' && item.session_type === 'daily') return true;
+            if (session === 'daily' && item.session_type === 'morning') return true;
+          }
+          return false;
+        })
+        .reduce((sum, item) => sum + item.booked_count, 0);
+
+      const ghostBookings = Math.max(0, generalBookedCount - totalSpecificBookings);
+
+      // Reduce availability by the known specific count AND the unknown ghost count
+      const available = Math.max(0, totalInFleet - bookedCount - ghostBookings);
 
       // Get height range
       const heightRange = heightRanges.find(r => r.size === size);
@@ -252,7 +523,7 @@ export default function BookingPage() {
         maxHeight: heightRange?.maxHeight || 0
       };
     });
-  }, [date, session, bikes, publicAvailabilityBySize, heightRanges]);
+  }, [date, session, bikes, publicAvailabilityBySize, heightRanges, availabilityMap]); */
 
   // Coupon state
   const [couponInput, setCouponInput] = useState('');
@@ -308,11 +579,26 @@ export default function BookingPage() {
   };
 
   const calculateTotal = () => {
-    const sessionPrice = session === 'morning' ? pricingData.morningSession : pricingData.dailySession;
-    // Count only riders with names (valid riders) to match the display logic
-    const ridersTotal = riders.filter(r => r.name).length * sessionPrice;
+    // DYNAMIC PRICING RULE: Use DB values matching the UI
+    // Default to 101 if data missing (fallback)
+    const morningPrice = pricingData.morningSession || 101;
+    const dailyPrice = pricingData.dailySession || 135; // Default for daily
+    const PRICE_PER_RIDER = session === 'morning' ? morningPrice : dailyPrice;
+
+    // REMOVED 'BOOKING_FEE' (99) to match user expectation: 101 + 101 = 202.
+    // If a fee is needed, it must be in the DB and displayed explicitly. 
+    // Currently assume 0.
+    const BOOKING_FEE = 0;
+
+    // Count only riders with names (valid riders)
+    const validRidersCount = riders.filter(r => r.name).length;
+
+    if (validRidersCount === 0) return 0; // Should not happen during submission but safe check
+
+    const ridersTotal = validRidersCount * PRICE_PER_RIDER;
     const picnicTotal = calculatePicnicItemsTotal();
-    const subtotal = ridersTotal + picnicTotal;
+
+    const subtotal = ridersTotal + BOOKING_FEE + picnicTotal;
 
     if (appliedCoupon) {
       if (appliedCoupon.discountType === 'percent') {
@@ -326,10 +612,16 @@ export default function BookingPage() {
   };
 
   const calculateSubtotal = () => {
-    const sessionPrice = session === 'morning' ? pricingData.morningSession : pricingData.dailySession;
-    const ridersTotal = riders.filter(r => r.name).length * sessionPrice;
-    const picnicTotal = calculatePicnicItemsTotal();
-    return ridersTotal + picnicTotal;
+    // DYNAMIC PRICING RULE: Match calculateTotal
+    const morningPrice = pricingData.morningSession || 101;
+    const dailyPrice = pricingData.dailySession || 135;
+    const PRICE_PER_RIDER = session === 'morning' ? morningPrice : dailyPrice;
+    const BOOKING_FEE = 0;
+
+    const validRidersCount = riders.filter(r => r.name).length;
+    if (validRidersCount === 0) return 0;
+
+    return (validRidersCount * PRICE_PER_RIDER) + BOOKING_FEE + calculatePicnicItemsTotal();
   };
 
   const updateRiderPicnicItemQuantity = (riderId: string, itemId: string, delta: number) => {
@@ -1065,6 +1357,22 @@ export default function BookingPage() {
                       className="pointer-events-auto p-3"
                       locale={isRTL ? he : undefined}
                     />
+                    {/* Availability Summary Footer */}
+                    <div className="p-3 border-t bg-muted/30 text-center">
+                      {date ? (() => {
+                        const { remainingBikes } = checkPublicAvailability(date, session, 0);
+                        return (
+                          <div className={`text-sm font-bold ${remainingBikes === 0 ? 'text-destructive' : 'text-primary'}`}>
+                            {isRTL ? 'סה"כ אופניים פנויים: ' : 'Total Bikes Available: '}
+                            {remainingBikes}
+                          </div>
+                        );
+                      })() : (
+                        <div className="text-sm text-muted-foreground">
+                          {isRTL ? 'בחר תאריך לצפייה בזמינות' : 'Select a date to see availability'}
+                        </div>
+                      )}
+                    </div>
                   </PopoverContent>
                 </Popover>
               </div>
@@ -1166,108 +1474,7 @@ export default function BookingPage() {
                 </div>
               </div>
 
-              {/* Real-time Availability Table */}
-              {date && (
-                <div className="mt-6 p-4 bg-muted/50 rounded-xl">
-                  <h3 className="font-semibold mb-3 flex items-center gap-2">
-                    📊 {t('availabilityForDate')}
-                  </h3>
-                  {(() => {
-                    // Use server-side RPC data for accurate public availability
-                    const currentDayStr = format(new Date(date), 'yyyy-MM-dd');
-                    const yesterdayStr = format(addDays(new Date(date), -1), 'yyyy-MM-dd');
-
-                    const availabilityBySize = (['XS', 'S', 'M', 'L', 'XL'] as BikeSize[]).map(size => {
-                      // 1. Get Total Capacity from DB (Active Bikes)
-                      // Exclude maintenance
-                      const totalInFleet = bikes.filter(b => b.size === size && b.status !== 'unavailable' && b.status !== 'maintenance').length;
-
-                      // 2. Count Bookings from RPC Data
-                      let bookedCount = 0;
-
-                      // Filter RPC data for relevant bookings
-                      const relevantBookings = publicAvailabilityBySize.filter(item => {
-                        // Exact match
-                        if (item.booking_date === currentDayStr && item.session_type === session && item.bike_size === size) return true;
-
-                        // Yesterday Daily blocks Today
-                        if (item.booking_date === yesterdayStr && item.session_type === 'daily' && item.bike_size === size) return true;
-
-                        // Overlap: Morning blocks Daily, Daily blocks Morning (Same Day)
-                        if (item.booking_date === currentDayStr && item.bike_size === size) {
-                          if (session === 'morning' && item.session_type === 'daily') return true;
-                          if (session === 'daily' && item.session_type === 'morning') return true;
-                        }
-
-                        return false;
-                      });
-
-                      bookedCount = relevantBookings.reduce((sum, item) => sum + item.booked_count, 0);
-
-                      const available = Math.max(0, totalInFleet - bookedCount);
-
-                      // Get height range
-                      const heightRange = heightRanges.find(r => r.size === size);
-
-                      return {
-                        size,
-                        available,
-                        total: totalInFleet,
-                        minHeight: heightRange?.minHeight || 0,
-                        maxHeight: heightRange?.maxHeight || 0
-                      };
-                    });
-
-                    const filteredAvailability = availabilityBySize.filter(s => s.total > 0);
-                    const totalRealAvailable = filteredAvailability.reduce((sum, item) => sum + item.available, 0);
-
-                    return (
-                      <>
-                        <div className="overflow-x-auto">
-                          <table className="w-full text-sm">
-                            <thead>
-                              <tr className="border-b border-border">
-                                <th className="py-2 text-start">{t('size')}</th>
-                                <th className="py-2 text-start">{t('heightRange')}</th>
-                                <th className="py-2 text-start">{t('available')}</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {filteredAvailability.map(({ size, available, total, minHeight, maxHeight }) => {
-                                const getStatusIcon = () => {
-                                  if (available === 0) return '❌';
-                                  if (available === 1) return '⚠️';
-                                  if (available <= 2) return '⚠️'; // Low stock warning
-                                  return '✅';
-                                };
-                                const getStatusColor = () => {
-                                  if (available === 0) return 'text-destructive';
-                                  if (available === 1) return 'text-yellow-500';
-                                  if (available <= 2) return 'text-yellow-500';
-                                  return 'text-green-500';
-                                };
-                                return (
-                                  <tr key={size} className="border-b border-border/50">
-                                    <td className="py-2 font-medium">{size}</td>
-                                    <td className="py-2 text-muted-foreground">{minHeight}-{maxHeight} {t('heightCm')}</td>
-                                    <td className={`py-2 font-semibold ${getStatusColor()}`}>
-                                      {getStatusIcon()} {t('bikesAvailable').replace('{available}', String(available))}
-                                      {available === 1 && <span className="text-xs ms-1">({t('lastOne')})</span>}
-                                    </td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
-                        <div className="mt-3 text-sm text-muted-foreground">
-                          {t('totalAvailable').replace('{available}', String(totalRealAvailable))}
-                        </div>
-                      </>
-                    );
-                  })()}
-                </div>
-              )}
+              {/* Real-time Availability Table REMOVED per user request */}
             </div>
           )}
 
